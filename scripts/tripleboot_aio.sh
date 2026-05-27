@@ -41,6 +41,19 @@ assert_uefi(){ is_uefi || die "System is not booted in UEFI mode. Reboot install
 run(){ log "RUN $*"; if $DRY_RUN; then printf '%s[DRY-RUN]%s %s\n' "$BLUE" "$RESET" "$*"; else "$@"; fi; }
 require(){ have "$1" || die "Missing command: $1"; }
 
+
+tripleboot_banner(){
+  cat <<'EOF'
+████████╗██████╗ ██╗██████╗ ██╗     ███████╗██████╗  ██████╗  ██████╗ ████████╗
+╚══██╔══╝██╔══██╗██║██╔══██╗██║     ██╔════╝██╔══██╗██╔═══██╗██╔═══██╗╚══██╔══╝
+   ██║   ██████╔╝██║██████╔╝██║     █████╗  ██████╔╝██║   ██║██║   ██║   ██║   
+   ██║   ██╔══██╗██║██╔═══╝ ██║     ██╔══╝  ██╔══██╗██║   ██║██║   ██║   ██║   
+   ██║   ██║  ██║██║██║     ███████╗███████╗██████╔╝╚██████╔╝╚██████╔╝   ██║   
+   ╚═╝   ╚═╝  ╚═╝╚═╝╚═╝     ╚══════╝╚══════╝╚═════╝  ╚═════╝  ╚═════╝    ╚═╝   
+    UEFI / GPT / OpenCore Lab Assistant  ::  PLAN • SCAN • ANALYZE • SAFEGUARD
+EOF
+}
+
 confirm(){
   local token="$1" msg="$2"
   $NONINTERACTIVE && die "Confirmation required but --noninteractive is set: $msg"
@@ -88,6 +101,8 @@ usage(){
   cat <<EOF
 ${BOLD}TripleBoot AIO v$VERSION${RESET}
 
+$(tripleboot_banner)
+
 Commands:
   plan
   install-deps
@@ -117,6 +132,8 @@ EOF
 
 plan(){
   cat <<EOF
+$(tripleboot_banner)
+
 TripleBoot plan
 
 1. UEFI/GPT only.
@@ -145,8 +162,8 @@ EOF
 install_deps(){
   need_root
   have apt-get || die "Only apt-based systems are automated here."
-  run apt-get update
-  run apt-get install -y bash coreutils util-linux gawk sed grep findutils file jq curl wget unzip zip git rsync gdisk parted dosfstools e2fsprogs ntfs-3g efibootmgr mokutil pciutils dmidecode lshw hwinfo acpica-tools fwupd nvme-cli qemu-utils qemu-system-x86 ovmf python3 python3-pip refind shellcheck || true
+  run env DEBIAN_FRONTEND=noninteractive apt-get update
+  run env DEBIAN_FRONTEND=noninteractive apt-get install -y bash coreutils util-linux gawk sed grep findutils file jq curl wget unzip zip git rsync gdisk parted dosfstools e2fsprogs ntfs-3g efibootmgr mokutil pciutils usbutils dmidecode lshw hwinfo acpica-tools fwupd nvme-cli qemu-utils qemu-system-x86 ovmf python3 python3-pip alsa-utils refind shellcheck || true
 }
 
 scan(){
