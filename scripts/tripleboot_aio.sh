@@ -42,6 +42,24 @@ run(){ log "RUN $*"; if $DRY_RUN; then printf '%s[DRY-RUN]%s %s\n' "$BLUE" "$RES
 require(){ have "$1" || die "Missing command: $1"; }
 
 
+CYAN=""; MAGENTA=""
+if [[ -t 1 ]]; then
+  CYAN=$'[36m'; MAGENTA=$'[35m'
+fi
+
+ui_section(){ printf '
+%s==>%s %s
+' "$MAGENTA" "$RESET" "$*"; log "SECTION $*"; }
+ui_progress(){
+  local percent="$1" width=30 filled empty bar
+  (( percent < 0 )) && percent=0; (( percent > 100 )) && percent=100
+  filled=$((percent * width / 100)); empty=$((width - filled))
+  bar="$(printf '%*s' "$filled" '' | tr ' ' '#')$(printf '%*s' "$empty" '' | tr ' ' '-')"
+  printf '%s[%s]%s %3d%%
+' "$CYAN" "$bar" "$RESET" "$percent"
+}
+
+
 tripleboot_banner(){
   cat <<'EOF'
 ████████╗██████╗ ██╗██████╗ ██╗     ███████╗██████╗  ██████╗  ██████╗ ████████╗
@@ -157,9 +175,15 @@ TripleBoot plan
 6. Never share swap across OSes.
 7. Backup ESPs before changing boot files or boot order.
 EOF
+  ui_section "Plan readiness"
+  ui_progress 15
+  ui_progress 45
+  ui_progress 75
+  ui_progress 100
 }
 
 install_deps(){
+  ui_section "Installing dependencies"
   need_root
   have apt-get || die "Only apt-based systems are automated here."
   run env DEBIAN_FRONTEND=noninteractive apt-get update
@@ -167,6 +191,7 @@ install_deps(){
 }
 
 scan(){
+  ui_section "Running hardware scan"
   need_root
   mkdir -p "$INVENTORY_DIR/raw" "$INVENTORY_DIR/parsed"
   local r="$INVENTORY_DIR/raw"
@@ -229,6 +254,7 @@ PY
 }
 
 analyze(){
+  ui_section "Building analysis report"
   local inv="$INVENTORY_DIR/parsed/inventory.json"
   [[ -f "$inv" ]] || die "Run scan first."
   require jq
