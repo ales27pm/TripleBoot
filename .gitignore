@@ -1,0 +1,33 @@
+# TripleBoot generated runtime data
+tripleboot-aio/
+logs/
+inventory/
+build/
+downloads/
+backups/
+*.log
+
+# Local environment
+.env
+.env.*
+!.env.example
+
+# Archives / downloaded binaries
+*.zip
+*.tar.gz
+*.7z
+*.dmg
+*.iso
+
+# EFI builds and binary firmware payloads
+EFI/
+*.efi
+*.kext/
+*.aml
+*.rom
+*.bin
+
+# Editor noise
+.DS_Store
+.vscode/
+.idea/
