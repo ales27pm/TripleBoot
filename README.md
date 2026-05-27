@@ -1,1 +1,4 @@
 # TripleBoot
+linux
+win
+darwin
