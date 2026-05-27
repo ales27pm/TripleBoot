@@ -20,6 +20,13 @@ DRY_RUN=false
 FORCE=false
 NONINTERACTIVE=false
 YES_DESTROY=false
+SHOW_BANNER=true
+APT_DEPS=(
+  bash coreutils util-linux gawk sed grep findutils file jq curl wget unzip zip git rsync
+  gdisk parted dosfstools e2fsprogs ntfs-3g efibootmgr mokutil pciutils usbutils dmidecode
+  lshw hwinfo acpica-tools fwupd nvme-cli qemu-utils qemu-system-x86 ovmf python3 python3-pip
+  alsa-utils refind shellcheck
+)
 
 if [[ -t 1 ]]; then
   RED=$'\033[31m'; GREEN=$'\033[32m'; YELLOW=$'\033[33m'; BLUE=$'\033[34m'; BOLD=$'\033[1m'; RESET=$'\033[0m'
@@ -61,6 +68,7 @@ ui_progress(){
 
 
 tripleboot_banner(){
+  $SHOW_BANNER || return 0
   cat <<'EOF'
 ████████╗██████╗ ██╗██████╗ ██╗     ███████╗██████╗  ██████╗  ██████╗ ████████╗
 ╚══██╔══╝██╔══██╗██║██╔══██╗██║     ██╔════╝██╔══██╗██╔═══██╗██╔═══██╗╚══██╔══╝
@@ -141,6 +149,7 @@ Global flags:
   --dry-run
   --force
   --noninteractive
+  --no-banner
 
 Default layout:
   Disk A: 1 GiB EFI + rest Ubuntu ext4.
@@ -186,8 +195,9 @@ install_deps(){
   ui_section "Installing dependencies"
   need_root
   have apt-get || die "Only apt-based systems are automated here."
-  run env DEBIAN_FRONTEND=noninteractive apt-get update
-  run env DEBIAN_FRONTEND=noninteractive apt-get install -y bash coreutils util-linux gawk sed grep findutils file jq curl wget unzip zip git rsync gdisk parted dosfstools e2fsprogs ntfs-3g efibootmgr mokutil pciutils usbutils dmidecode lshw hwinfo acpica-tools fwupd nvme-cli qemu-utils qemu-system-x86 ovmf python3 python3-pip alsa-utils refind shellcheck || true
+  export DEBIAN_FRONTEND=noninteractive
+  run apt-get update
+  run apt-get install -y "${APT_DEPS[@]}"
 }
 
 scan(){
@@ -451,15 +461,19 @@ restore_efi(){
   local m; m="$(mktemp -d)"; run mount "$esp" "$m"; run rsync -aHAX --delete "$backup"/ "$m"/; sync; run umount "$m"; rmdir "$m" || true
 }
 
-parse_globals(){
-  local out=()
-  while [[ $# -gt 0 ]]; do case "$1" in --dry-run) DRY_RUN=true; shift;; --force) FORCE=true; shift;; --noninteractive) NONINTERACTIVE=true; shift;; *) out+=("$1"); shift;; esac; done
-  printf '%s\n' "${out[@]}"
-}
-
 main(){
   [[ $# -gt 0 ]] || { usage; exit 1; }
-  mapfile -t argv < <(parse_globals "$@"); set -- "${argv[@]}"
+  local out=()
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --dry-run) DRY_RUN=true; shift;;
+      --force) FORCE=true; shift;;
+      --noninteractive) NONINTERACTIVE=true; shift;;
+      --no-banner) SHOW_BANNER=false; shift;;
+      *) out+=("$1"); shift;;
+    esac
+  done
+  set -- "${out[@]}"
   local cmd="$1"; shift || true
   case "$cmd" in
     help|-h|--help) usage;; plan) plan;; install-deps) install_deps;; scan) scan;; analyze) analyze;; backup-efi) backup_efi;; boot-report) boot_report;; partition) partition_cmd "$@";; setup-swap) setup_swap "$@";; download-opencore) download_opencore "$@";; download-kexts) download_kexts;; build-opencore-scaffold) build_opencore_scaffold "$@";; validate-opencore) validate_opencore;; make-usb) make_usb "$@";; restore-efi) restore_efi "$@";; *) die "Unknown command: $cmd";;
