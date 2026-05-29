@@ -35,6 +35,24 @@ sudo scripts/tripleboot_aio.sh build-opencore-scaffold \
 sudo scripts/tripleboot_aio.sh validate-opencore
 ```
 
+
+## Standalone Linux recovery workspace script
+
+If you want a focused Linux-only OpenCore recovery workspace outside the full TripleBoot AIO flow, use:
+
+```bash
+chmod +x scripts/hackintosh-opencore-prepare.sh
+scripts/hackintosh-opencore-prepare.sh --macos sequoia --workdir "$HOME/hackintosh"
+```
+
+To destructively format and stage a USB disk, add `--disk` and run with root privileges after verifying the target disk name:
+
+```bash
+sudo scripts/hackintosh-opencore-prepare.sh --macos sequoia --disk /dev/sdX --workdir "$HOME/hackintosh"
+```
+
+Supported recovery choices are `ventura`, `sonoma`, `sequoia`, and `tahoe`. The script intentionally copies OpenCore's sample config as a starting point only; hardware-specific ACPI, SMBIOS, USB mapping, audio layout, and GPU configuration still require manual review.
+
 ## Why `Sample.plist` matters
 
 OpenCore changes over time. Starting from the matching `Sample.plist` and validating with the same release's `ocvalidate` reduces drift between config format and bootloader version.

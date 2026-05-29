@@ -30,6 +30,7 @@ The project must never behave like a blind installer. Destructive operations req
 ## Generated assets
 
 - `scripts/tripleboot_aio.sh`: main AIO script
+- `scripts/hackintosh-opencore-prepare.sh`: standalone Linux OpenCore recovery workspace/USB preparer
 - `docs/`: operational documentation
 - `examples/tripleboot.env.example`: environment configuration example
 - `.github/workflows/shellcheck.yml`: shell lint CI
