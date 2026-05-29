@@ -26,7 +26,7 @@ APT_DEPS=(
   bash coreutils util-linux gawk sed grep findutils file jq curl wget unzip zip git rsync
   gdisk parted dosfstools e2fsprogs ntfs-3g efibootmgr mokutil pciutils usbutils dmidecode
   lshw hwinfo acpica-tools fwupd nvme-cli qemu-utils qemu-system-x86 ovmf python3 python3-pip
-  alsa-utils shellcheck wimtools
+  alsa-utils shellcheck wimtools uml-utilities virt-manager libguestfs-tools p7zip-full make dmg2img tesseract-ocr tesseract-ocr-eng genisoimage net-tools screen
 )
 
 if [[ -t 1 ]]; then
@@ -161,6 +161,13 @@ Commands:
   prepare-usb-windows --usb-disk DISK --iso FILE --yes-destroy
   download-macos [--version VERSION]
   prepare-usb-macos --volume-name NAME [--app-path PATH]
+  osx-kvm-doctor
+  osx-kvm-clone [--dir DIR]
+  osx-kvm-fetch [--dir DIR]
+  osx-kvm-convert [--dir DIR]
+  osx-kvm-create-disk [--dir DIR] [--size 256G]
+  osx-kvm-boot [--dir DIR]
+  osx-kvm-offline-iso --pkg FILE [--dir DIR]
   backup-efi
   boot-report
   partition --ubuntu-disk DISK --winmac-disk DISK --yes-destroy
@@ -1043,6 +1050,226 @@ prepare_usb_macos() {
   echo "[OK] macOS bootable installer prepared on: $volume"
 }
 
+
+osx_kvm_dir_default() {
+  printf '%s\n' "${OSX_KVM_DIR:-$HOME/OSX-KVM}"
+}
+
+osx_kvm_doctor() {
+  ui_section "OSX-KVM doctor"
+
+  local repo_dir=""
+  local cpu_flags=""
+  local missing=0
+  local cmd=""
+
+  repo_dir="$(osx_kvm_dir_default)"
+  cpu_flags="$(grep -m1 -E '^flags|^Features' /proc/cpuinfo 2>/dev/null || true)"
+
+  echo "OSX-KVM directory: $repo_dir"
+  echo
+
+  echo "=== Required virtualization ==="
+  if grep -Eq 'vmx|svm' /proc/cpuinfo 2>/dev/null; then
+    echo "[OK] CPU virtualization flag found: vmx/svm"
+  else
+    echo "[WARN] CPU virtualization flag not found. Enable Intel VT-x / AMD SVM in BIOS."
+  fi
+
+  if [[ "$cpu_flags" == *sse4_1* || "$cpu_flags" == *sse4.1* ]]; then
+    echo "[OK] SSE4.1 available"
+  else
+    echo "[WARN] SSE4.1 not detected"
+  fi
+
+  if [[ "$cpu_flags" == *avx2* ]]; then
+    echo "[OK] AVX2 available for Ventura+"
+  else
+    echo "[WARN] AVX2 not detected. Ventura+ may not work."
+  fi
+
+  echo
+  echo "=== Kernel KVM status ==="
+  if [[ -e /dev/kvm ]]; then
+    echo "[OK] /dev/kvm exists"
+  else
+    echo "[WARN] /dev/kvm missing. Try: sudo modprobe kvm_intel"
+  fi
+
+  if [[ -r /sys/module/kvm/parameters/ignore_msrs ]]; then
+    echo "kvm.ignore_msrs: $(cat /sys/module/kvm/parameters/ignore_msrs)"
+  else
+    echo "[WARN] Could not read kvm ignore_msrs"
+  fi
+
+  echo
+  echo "=== Tooling ==="
+  for cmd in qemu-system-x86_64 qemu-img git wget dmg2img mkisofs make screen; do
+    if have "$cmd"; then
+      echo "[OK] $cmd"
+    else
+      echo "[WARN] Missing: $cmd"
+      missing=$((missing + 1))
+    fi
+  done
+
+  echo
+  echo "=== Repository ==="
+  if [[ -d "$repo_dir/.git" ]]; then
+    echo "[OK] OSX-KVM repo exists: $repo_dir"
+  else
+    echo "[WARN] OSX-KVM repo not found. Run: sudo scripts/tripleboot_aio.sh osx-kvm-clone"
+  fi
+
+  echo
+  echo "=== GPU expectation ==="
+  echo "[WARN] OSX-KVM is VM/lab macOS. Do not expect native GPU acceleration by default."
+}
+
+osx_kvm_clone() {
+  local repo_dir=""
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --dir) repo_dir="$2"; shift 2 ;;
+      *) die "Unknown osx-kvm-clone arg: $1" ;;
+    esac
+  done
+
+  [[ -n "$repo_dir" ]] || repo_dir="$(osx_kvm_dir_default)"
+
+  if [[ -d "$repo_dir/.git" ]]; then
+    echo "[OK] OSX-KVM already cloned: $repo_dir"
+    return 0
+  fi
+
+  mkdir -p "$(dirname "$repo_dir")"
+  run git clone --depth 1 --recursive https://github.com/kholia/OSX-KVM.git "$repo_dir"
+  echo "[OK] OSX-KVM cloned: $repo_dir"
+}
+
+osx_kvm_fetch() {
+  local repo_dir=""
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --dir) repo_dir="$2"; shift 2 ;;
+      *) die "Unknown osx-kvm-fetch arg: $1" ;;
+    esac
+  done
+
+  [[ -n "$repo_dir" ]] || repo_dir="$(osx_kvm_dir_default)"
+  [[ -d "$repo_dir" ]] || die "OSX-KVM repo not found: $repo_dir"
+
+  echo "[INFO] This opens the OSX-KVM macOS product selector."
+  (
+    cd "$repo_dir"
+    run ./fetch-macOS-v2.py
+  )
+}
+
+osx_kvm_convert() {
+  local repo_dir=""
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --dir) repo_dir="$2"; shift 2 ;;
+      *) die "Unknown osx-kvm-convert arg: $1" ;;
+    esac
+  done
+
+  [[ -n "$repo_dir" ]] || repo_dir="$(osx_kvm_dir_default)"
+  [[ -f "$repo_dir/BaseSystem.dmg" ]] || die "BaseSystem.dmg not found in $repo_dir. Run osx-kvm-fetch first."
+  require dmg2img
+
+  (
+    cd "$repo_dir"
+    run dmg2img -i BaseSystem.dmg BaseSystem.img
+  )
+
+  echo "[OK] Created: $repo_dir/BaseSystem.img"
+}
+
+osx_kvm_create_disk() {
+  local repo_dir=""
+  local size="256G"
+  local disk_name="mac_hdd_ng.img"
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --dir) repo_dir="$2"; shift 2 ;;
+      --size) size="$2"; shift 2 ;;
+      --disk-name) disk_name="$2"; shift 2 ;;
+      *) die "Unknown osx-kvm-create-disk arg: $1" ;;
+    esac
+  done
+
+  [[ -n "$repo_dir" ]] || repo_dir="$(osx_kvm_dir_default)"
+  [[ -d "$repo_dir" ]] || die "OSX-KVM repo not found: $repo_dir"
+  require qemu-img
+
+  if [[ -f "$repo_dir/$disk_name" ]]; then
+    echo "[OK] Disk already exists: $repo_dir/$disk_name"
+    return 0
+  fi
+
+  (
+    cd "$repo_dir"
+    run qemu-img create -f qcow2 "$disk_name" "$size"
+  )
+
+  echo "[OK] Created macOS VM disk: $repo_dir/$disk_name"
+}
+
+osx_kvm_boot() {
+  local repo_dir=""
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --dir) repo_dir="$2"; shift 2 ;;
+      *) die "Unknown osx-kvm-boot arg: $1" ;;
+    esac
+  done
+
+  [[ -n "$repo_dir" ]] || repo_dir="$(osx_kvm_dir_default)"
+  [[ -x "$repo_dir/OpenCore-Boot.sh" ]] || die "OpenCore-Boot.sh not found or not executable in $repo_dir"
+  [[ -f "$repo_dir/BaseSystem.img" ]] || echo "[WARN] BaseSystem.img not found. Install boot may fail unless already installed."
+  [[ -f "$repo_dir/mac_hdd_ng.img" ]] || echo "[WARN] mac_hdd_ng.img not found. Run osx-kvm-create-disk first."
+
+  (
+    cd "$repo_dir"
+    run ./OpenCore-Boot.sh
+  )
+}
+
+osx_kvm_offline_iso() {
+  local repo_dir=""
+  local pkg=""
+  local output="InstallAssistant.iso"
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --dir) repo_dir="$2"; shift 2 ;;
+      --pkg) pkg="$2"; shift 2 ;;
+      --output) output="$2"; shift 2 ;;
+      *) die "Unknown osx-kvm-offline-iso arg: $1" ;;
+    esac
+  done
+
+  [[ -n "$repo_dir" ]] || repo_dir="$(osx_kvm_dir_default)"
+  [[ -f "$pkg" ]] || die "InstallAssistant.pkg not found: $pkg"
+  [[ -f "$repo_dir/scripts/run_offline.sh" ]] || die "run_offline.sh not found in $repo_dir/scripts"
+  require mkisofs
+
+  (
+    cd "$repo_dir"
+    run mkisofs -allow-limited-size -l -J -r -iso-level 3 -V InstallAssistant -o "$output" "$pkg" scripts/run_offline.sh
+  )
+
+  echo "[OK] Offline InstallAssistant ISO created: $repo_dir/$output"
+  echo "[INFO] You still need to attach it to OpenCore-Boot.sh as MacDVD, matching OSX-KVM offline docs."
+}
+
 preflight_partition() {
   ui_section "Preflight partition safety check"
 
@@ -1345,6 +1572,13 @@ main() {
     prepare-usb-windows) prepare_usb_windows "$@" ;;
     download-macos) download_macos "$@" ;;
     prepare-usb-macos) prepare_usb_macos "$@" ;;
+    osx-kvm-doctor) osx_kvm_doctor "$@" ;;
+    osx-kvm-clone) osx_kvm_clone "$@" ;;
+    osx-kvm-fetch) osx_kvm_fetch "$@" ;;
+    osx-kvm-convert) osx_kvm_convert "$@" ;;
+    osx-kvm-create-disk) osx_kvm_create_disk "$@" ;;
+    osx-kvm-boot) osx_kvm_boot "$@" ;;
+    osx-kvm-offline-iso) osx_kvm_offline_iso "$@" ;;
     backup-efi) backup_efi ;;
     boot-report) boot_report ;;
     partition) partition_cmd "$@" ;;
