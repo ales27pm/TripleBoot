@@ -742,10 +742,18 @@ doctor() {
     echo "[WARN] Could not detect running root disk"
   fi
 
-  data_parts="$(lsblk -rpno NAME,PARTLABEL,LABEL,FSTYPE,MOUNTPOINTS | awk '$2 == "DATA" || $3 == "DATA" {print $0}' || true)"
-  if [[ -n "$data_parts" ]]; then
+  mapfile -t data_partitions < <(lsblk -rpno NAME,PARTLABEL,LABEL | awk '$2 == "DATA" || $3 == "DATA" {print $1}' || true)
+  if [[ "${#data_partitions[@]}" -gt 0 ]]; then
     echo "[WARN] DATA partition detected. Do not partition its parent disk unless you intend to wipe it:"
-    echo "$data_parts"
+    local data_partition parent_disk
+    for data_partition in "${data_partitions[@]}"; do
+      parent_disk="$(lsblk -no PKNAME "$data_partition" 2>/dev/null | head -n1 || true)"
+      if [[ -n "$parent_disk" && "$parent_disk" != /dev/* ]]; then
+        parent_disk="/dev/$parent_disk"
+      fi
+      echo "DATA partition: $data_partition"
+      echo "Parent disk: ${parent_disk:-unknown}"
+    done
   fi
 
   echo
