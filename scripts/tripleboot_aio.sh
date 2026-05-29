@@ -8,7 +8,6 @@ set -Eeuo pipefail
 IFS=$'\n\t'
 
 VERSION="2026.05.26"
-SCRIPT_NAME="$(basename "$0")"
 WORKDIR="${TRIPLEBOOT_WORKDIR:-$HOME/tripleboot-aio}"
 BACKUP_ROOT="${TRIPLEBOOT_BACKUP_ROOT:-$WORKDIR/backups}"
 INVENTORY_DIR="${TRIPLEBOOT_INVENTORY_DIR:-$WORKDIR/inventory}"
@@ -133,7 +132,9 @@ unmount_disk() {
   while read -r part; do
     [[ -n "$part" ]] || continue
     while read -r mountpoint; do
-      [[ -n "$mountpoint" ]] && run umount "$mountpoint" || true
+      if [[ -n "$mountpoint" ]]; then
+        run umount "$mountpoint" || true
+      fi
     done < <(lsblk -lnpo MOUNTPOINTS "$part" 2>/dev/null | tr ' ' '\n' | sed '/^$/d')
   done < <(lsblk -lnpo NAME "$disk" | tail -n +2 || true)
 }
@@ -330,7 +331,8 @@ backup_efi() {
   require rsync
   require mount
   require umount
-  local dest="$BACKUP_ROOT/efi-$(date +%Y%m%d-%H%M%S)" esp mnt safe
+  local dest esp mnt safe
+  dest="$BACKUP_ROOT/efi-$(date +%Y%m%d-%H%M%S)"
   mkdir -p "$dest"
   mapfile -t esps < <(detect_esps)
   [[ ${#esps[@]} -gt 0 ]] || die "No EFI partitions detected."
@@ -355,13 +357,17 @@ boot_report() {
   need_root
   echo "=== UEFI ==="
   is_uefi && echo yes || echo no
-  have mokutil && mokutil --sb-state || true
+  if have mokutil; then
+    mokutil --sb-state || true
+  fi
   echo
   echo "=== Disks ==="
   lsblk -e7 -o NAME,SIZE,TYPE,FSTYPE,PTTYPE,PARTTYPENAME,PARTLABEL,LABEL,MOUNTPOINTS,MODEL
   echo
   echo "=== Boot entries ==="
-  have efibootmgr && efibootmgr -v || true
+  if have efibootmgr; then
+    efibootmgr -v || true
+  fi
   echo
   echo "=== EFI loaders ==="
   local esp mnt
