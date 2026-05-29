@@ -150,6 +150,7 @@ Commands:
   install-refind
   scan
   analyze
+  doctor
   backup-efi
   boot-report
   partition --ubuntu-disk DISK --winmac-disk DISK --yes-destroy
@@ -676,6 +677,99 @@ restore_efi() {
   rmdir "$mount_dir" || true
 }
 
+
+doctor() {
+  ui_section "TripleBoot doctor"
+
+  need_root
+
+  local inv="$INVENTORY_DIR/parsed/inventory.json"
+  local latest_backup=""
+  local efi_count="0"
+  local boot_order=""
+  local rootdisk=""
+  local data_parts=""
+
+  echo "=== System mode ==="
+  if is_uefi; then
+    echo "[OK] Booted in UEFI mode"
+  else
+    echo "[FAIL] Not booted in UEFI mode"
+  fi
+
+  if have mokutil; then
+    mokutil --sb-state || true
+  else
+    echo "[WARN] mokutil not installed"
+  fi
+
+  echo
+  echo "=== Hardware risk summary ==="
+  if [[ -f "$inv" ]] && have jq; then
+    echo "CPU: $(jq -r '.cpu_model // "unknown"' "$inv")"
+    echo "Board: $(jq -r '(.motherboard.vendor // "unknown") + " " + (.motherboard.product // "unknown")' "$inv")"
+    echo "Risk flags: $(jq -r '(.risk_flags // []) | join(", ")' "$inv")"
+    if jq -e '.has_nvidia_rtx_turing_like == true or .has_rtx_2070 == true' "$inv" >/dev/null; then
+      echo "[WARN] NVIDIA RTX/Turing detected: not a macOS acceleration path"
+    fi
+  else
+    echo "[WARN] No inventory found. Run: sudo scripts/tripleboot_aio.sh scan"
+  fi
+
+  echo
+  echo "=== Boot order ==="
+  if have efibootmgr; then
+    boot_order="$(efibootmgr 2>/dev/null | awk -F': ' '/BootOrder/ {print $2}' || true)"
+    echo "BootOrder: ${boot_order:-unknown}"
+    efibootmgr | grep -E '^Boot[0-9A-Fa-f]{4}' || true
+    if [[ "$boot_order" == 0001,* ]]; then
+      echo "[OK] Ubuntu appears first in current BootOrder"
+    else
+      echo "[WARN] Ubuntu does not appear first. Review with: sudo efibootmgr -v"
+    fi
+  else
+    echo "[WARN] efibootmgr not installed"
+  fi
+
+  echo
+  echo "=== Disk safety ==="
+  lsblk -e7 -o NAME,SIZE,TYPE,FSTYPE,PTTYPE,PARTTYPENAME,PARTLABEL,LABEL,MOUNTPOINTS,MODEL
+
+  rootdisk="$(root_parent_disk || true)"
+  if [[ -n "$rootdisk" ]]; then
+    echo "[OK] Running root disk detected: $rootdisk"
+  else
+    echo "[WARN] Could not detect running root disk"
+  fi
+
+  data_parts="$(lsblk -rpno NAME,LABEL,FSTYPE,MOUNTPOINTS | awk '$2 == "DATA" {print $0}' || true)"
+  if [[ -n "$data_parts" ]]; then
+    echo "[WARN] DATA partition detected. Do not partition its parent disk unless you intend to wipe it:"
+    echo "$data_parts"
+  fi
+
+  echo
+  echo "=== EFI backup status ==="
+  latest_backup="$(find "$BACKUP_ROOT" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | sort | tail -n1 || true)"
+  if [[ -n "$latest_backup" ]]; then
+    efi_count="$(find "$latest_backup" -type f -iname '*.efi' 2>/dev/null | wc -l | tr -d ' ')"
+    echo "Latest backup: $latest_backup"
+    echo "EFI file count: $efi_count"
+    if [[ "$efi_count" -gt 0 ]]; then
+      echo "[OK] Latest EFI backup contains EFI loaders"
+    else
+      echo "[WARN] Latest EFI backup contains no EFI files"
+    fi
+  else
+    echo "[WARN] No EFI backup found. Run: sudo scripts/tripleboot_aio.sh backup-efi"
+  fi
+
+  echo
+  echo "=== Recommended next action ==="
+  echo "Do not run partition from the installed Ubuntu unless intentionally wiping disks."
+  echo "For now: keep using scan/analyze/backup-efi/boot-report/doctor until the final disk plan is locked."
+}
+
 main() {
   [[ $# -gt 0 ]] || { usage; exit 1; }
   local args=() cmd
@@ -699,6 +793,7 @@ main() {
     install-refind) install_refind ;;
     scan) scan ;;
     analyze) analyze ;;
+    doctor) doctor ;;
     backup-efi) backup_efi ;;
     boot-report) boot_report ;;
     partition) partition_cmd "$@" ;;
