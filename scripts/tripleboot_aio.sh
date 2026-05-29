@@ -26,7 +26,7 @@ APT_DEPS=(
   bash coreutils util-linux gawk sed grep findutils file jq curl wget unzip zip git rsync
   gdisk parted dosfstools e2fsprogs ntfs-3g efibootmgr mokutil pciutils usbutils dmidecode
   lshw hwinfo acpica-tools fwupd nvme-cli qemu-utils qemu-system-x86 ovmf python3 python3-pip
-  alsa-utils shellcheck
+  alsa-utils shellcheck wimtools
 )
 
 if [[ -t 1 ]]; then
@@ -152,6 +152,15 @@ Commands:
   analyze
   doctor
   preflight-partition --ubuntu-disk DISK --winmac-disk DISK [--allow-wipe-data-on DISK]
+  installer-doctor
+  download-ubuntu [--version 26.04] [--edition desktop|server] [--arch amd64]
+  verify-iso-sha256 --iso FILE --sha256-file FILE
+  download-windows --iso-url URL | --iso-file FILE [--output-name NAME]
+  prepare-usb-dd --usb-disk DISK --iso FILE --yes-destroy
+  prepare-usb-ubuntu --usb-disk DISK --iso FILE --yes-destroy
+  prepare-usb-windows --usb-disk DISK --iso FILE --yes-destroy
+  download-macos [--version VERSION]
+  prepare-usb-macos --volume-name NAME [--app-path PATH]
   backup-efi
   boot-report
   partition --ubuntu-disk DISK --winmac-disk DISK --yes-destroy
@@ -680,6 +689,360 @@ restore_efi() {
 
 
 
+
+installer_doctor() {
+  ui_section "Installer factory doctor"
+
+  local host_os=""
+  local required_common=(curl sha256sum lsblk find awk sed grep)
+  local required_usb=(sgdisk wipefs partprobe mkfs.vfat mount umount rsync)
+  local cmd=""
+
+  host_os="$(uname -s 2>/dev/null || echo unknown)"
+
+  echo "Host OS: $host_os"
+  echo "Download directory: $DOWNLOAD_DIR"
+  echo
+
+  echo "=== Common tools ==="
+  for cmd in "${required_common[@]}"; do
+    if have "$cmd"; then
+      echo "[OK] $cmd"
+    else
+      echo "[WARN] Missing: $cmd"
+    fi
+  done
+
+  echo
+  echo "=== USB creation tools ==="
+  for cmd in "${required_usb[@]}"; do
+    if have "$cmd"; then
+      echo "[OK] $cmd"
+    else
+      echo "[WARN] Missing: $cmd"
+    fi
+  done
+
+  echo
+  echo "=== Windows USB support ==="
+  if have wimlib-imagex; then
+    echo "[OK] wimlib-imagex available for splitting install.wim onto FAT32"
+  else
+    echo "[WARN] wimlib-imagex missing. Install package: wimtools"
+  fi
+
+  echo
+  echo "=== macOS installer support ==="
+  if [[ "$host_os" == "Darwin" ]]; then
+    echo "[OK] macOS host detected"
+    if have softwareupdate; then
+      echo "[OK] softwareupdate available"
+    else
+      echo "[WARN] softwareupdate missing"
+    fi
+    echo "[INFO] createinstallmedia is inside the downloaded Install macOS.app bundle"
+  else
+    echo "[WARN] Full official macOS USB creation requires macOS and createinstallmedia"
+    echo "[INFO] On Linux, use this tool for OpenCore scaffolds, not official full macOS installer creation"
+  fi
+
+  echo
+  echo "=== Recommended flow ==="
+  echo "Ubuntu: download-ubuntu -> prepare-usb-ubuntu"
+  echo "Windows: download-windows --iso-url/--iso-file -> prepare-usb-windows"
+  echo "macOS: run download-macos/prepare-usb-macos from macOS only"
+}
+
+download_ubuntu() {
+  local version="26.04"
+  local edition="desktop"
+  local arch="amd64"
+  local file=""
+  local base_url=""
+  local iso_url=""
+  local sha_url=""
+  local dest=""
+  local sha_file=""
+  local check_file=""
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --version) version="$2"; shift 2 ;;
+      --edition) edition="$2"; shift 2 ;;
+      --arch) arch="$2"; shift 2 ;;
+      *) die "Unknown download-ubuntu arg: $1" ;;
+    esac
+  done
+
+  case "$edition" in
+    desktop) file="ubuntu-${version}-desktop-${arch}.iso" ;;
+    server|live-server) file="ubuntu-${version}-live-server-${arch}.iso" ;;
+    *) die "Unsupported Ubuntu edition: $edition. Use desktop or server." ;;
+  esac
+
+  base_url="https://releases.ubuntu.com/${version}"
+  iso_url="${base_url}/${file}"
+  sha_url="${base_url}/SHA256SUMS"
+  dest="$DOWNLOAD_DIR/installers/ubuntu/$file"
+  sha_file="$DOWNLOAD_DIR/installers/ubuntu/SHA256SUMS"
+  check_file="$DOWNLOAD_DIR/installers/ubuntu/SHA256SUMS.${file}"
+
+  mkdir -p "$DOWNLOAD_DIR/installers/ubuntu"
+
+  echo "Ubuntu ISO: $iso_url"
+  download_url "$iso_url" "$dest"
+  download_url "$sha_url" "$sha_file"
+
+  grep " ${file}$" "$sha_file" > "$check_file" || die "Could not find $file inside SHA256SUMS"
+  (
+    cd "$DOWNLOAD_DIR/installers/ubuntu"
+    sha256sum -c "$(basename "$check_file")"
+  )
+
+  echo "[OK] Ubuntu ISO downloaded and verified: $dest"
+}
+
+verify_iso_sha256() {
+  local iso=""
+  local sha256_file=""
+  local iso_base=""
+  local check_file=""
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --iso) iso="$2"; shift 2 ;;
+      --sha256-file) sha256_file="$2"; shift 2 ;;
+      *) die "Unknown verify-iso-sha256 arg: $1" ;;
+    esac
+  done
+
+  [[ -f "$iso" ]] || die "ISO not found: $iso"
+  [[ -f "$sha256_file" ]] || die "SHA256 file not found: $sha256_file"
+
+  iso_base="$(basename "$iso")"
+  check_file="$(mktemp)"
+
+  grep " ${iso_base}$" "$sha256_file" > "$check_file" || die "Could not find $iso_base in $sha256_file"
+  (
+    cd "$(dirname "$iso")"
+    sha256sum -c "$check_file"
+  )
+  rm -f "$check_file"
+
+  echo "[OK] Verified: $iso"
+}
+
+download_windows() {
+  local iso_url=""
+  local iso_file=""
+  local output_name="Windows11.iso"
+  local dest=""
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --iso-url) iso_url="$2"; shift 2 ;;
+      --iso-file) iso_file="$2"; shift 2 ;;
+      --output-name) output_name="$2"; shift 2 ;;
+      *) die "Unknown download-windows arg: $1" ;;
+    esac
+  done
+
+  mkdir -p "$DOWNLOAD_DIR/installers/windows"
+  dest="$DOWNLOAD_DIR/installers/windows/$output_name"
+
+  if [[ -n "$iso_file" ]]; then
+    [[ -f "$iso_file" ]] || die "Windows ISO file not found: $iso_file"
+    run cp -f "$iso_file" "$dest"
+  elif [[ -n "$iso_url" ]]; then
+    download_url "$iso_url" "$dest"
+  else
+    die "Windows ISO requires --iso-url URL or --iso-file FILE. Use Microsoft's official page to generate the ISO URL."
+  fi
+
+  echo "[OK] Windows ISO staged: $dest"
+}
+
+prepare_usb_dd() {
+  need_root
+  local usb=""
+  local iso=""
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --usb-disk) usb="$2"; shift 2 ;;
+      --iso) iso="$2"; shift 2 ;;
+      --yes-destroy) YES_DESTROY=true; shift ;;
+      *) die "Unknown prepare-usb-dd arg: $1" ;;
+    esac
+  done
+
+  [[ -f "$iso" ]] || die "ISO not found: $iso"
+  assert_disk "$usb"
+  protect_running_root "$usb"
+  [[ "$YES_DESTROY" == true ]] || die "USB write is destructive. Add --yes-destroy."
+
+  lsblk -e7 -o NAME,SIZE,TYPE,FSTYPE,PARTLABEL,LABEL,MOUNTPOINTS,MODEL
+  confirm WRITE_ISO_TO_USB "This will overwrite the entire USB disk: $usb"
+
+  unmount_disk "$usb"
+  run dd if="$iso" of="$usb" bs=4M status=progress conv=fsync
+  run sync
+
+  echo "[OK] ISO written to USB: $usb"
+}
+
+prepare_usb_ubuntu() {
+  local usb=""
+  local iso=""
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --usb-disk) usb="$2"; shift 2 ;;
+      --iso) iso="$2"; shift 2 ;;
+      --yes-destroy) YES_DESTROY=true; shift ;;
+      *) die "Unknown prepare-usb-ubuntu arg: $1" ;;
+    esac
+  done
+
+  prepare_usb_dd --usb-disk "$usb" --iso "$iso" --yes-destroy
+}
+
+prepare_usb_windows() {
+  need_root
+  require sgdisk
+  require wipefs
+  require partprobe
+  require mkfs.vfat
+  require mount
+  require umount
+  require rsync
+  require wimlib-imagex
+
+  local usb=""
+  local iso=""
+  local part=""
+  local iso_mnt=""
+  local usb_mnt=""
+  local wim_file=""
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --usb-disk) usb="$2"; shift 2 ;;
+      --iso) iso="$2"; shift 2 ;;
+      --yes-destroy) YES_DESTROY=true; shift ;;
+      *) die "Unknown prepare-usb-windows arg: $1" ;;
+    esac
+  done
+
+  [[ -f "$iso" ]] || die "Windows ISO not found: $iso"
+  assert_disk "$usb"
+  protect_running_root "$usb"
+  [[ "$YES_DESTROY" == true ]] || die "USB formatting is destructive. Add --yes-destroy."
+
+  lsblk -e7 -o NAME,SIZE,TYPE,FSTYPE,PARTLABEL,LABEL,MOUNTPOINTS,MODEL
+  confirm WIPE_WINDOWS_USB "This will erase USB disk $usb and create a Windows installer."
+
+  unmount_disk "$usb"
+  run sgdisk --zap-all "$usb"
+  run wipefs -af "$usb"
+  run sgdisk -n 1:1MiB:0 -t 1:0700 -c 1:WININSTALL "$usb"
+  run partprobe "$usb"
+  sleep 2
+
+  part="$(part_name "$usb" 1)"
+  run mkfs.vfat -F32 -n WININSTALL "$part"
+
+  iso_mnt="$(mktemp -d)"
+  usb_mnt="$(mktemp -d)"
+
+  run mount -o loop,ro "$iso" "$iso_mnt"
+  run mount "$part" "$usb_mnt"
+
+  wim_file="$(find "$iso_mnt/sources" -maxdepth 1 -iname 'install.wim' -print -quit 2>/dev/null || true)"
+
+  if [[ -n "$wim_file" ]]; then
+    run rsync -rlt --info=progress2 --exclude='/sources/install.wim' "$iso_mnt"/ "$usb_mnt"/
+    mkdir -p "$usb_mnt/sources"
+    run wimlib-imagex split "$wim_file" "$usb_mnt/sources/install.swm" 3800
+  else
+    run rsync -rlt --info=progress2 "$iso_mnt"/ "$usb_mnt"/
+  fi
+
+  sync
+  run umount "$usb_mnt"
+  run umount "$iso_mnt"
+  rmdir "$usb_mnt" "$iso_mnt" || true
+
+  echo "[OK] Windows USB installer prepared: $usb"
+}
+
+download_macos() {
+  local version=""
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --version) version="$2"; shift 2 ;;
+      *) die "Unknown download-macos arg: $1" ;;
+    esac
+  done
+
+  if [[ "$(uname -s 2>/dev/null || true)" != "Darwin" ]]; then
+    echo "[BLOCKED] Official macOS installer download requires macOS."
+    echo "Use a real Mac, your macOS VM, or booted macOS system, then rerun this command there."
+    return 2
+  fi
+
+  require softwareupdate
+
+  if [[ -n "$version" ]]; then
+    run softwareupdate --fetch-full-installer --full-installer-version "$version"
+  else
+    echo "Available installers:"
+    softwareupdate --list-full-installers
+    echo
+    echo "Rerun with: download-macos --version VERSION"
+  fi
+}
+
+prepare_usb_macos() {
+  need_root
+
+  local volume_name=""
+  local app_path=""
+  local tool=""
+  local volume=""
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --volume-name) volume_name="$2"; shift 2 ;;
+      --app-path) app_path="$2"; shift 2 ;;
+      *) die "Unknown prepare-usb-macos arg: $1" ;;
+    esac
+  done
+
+  if [[ "$(uname -s 2>/dev/null || true)" != "Darwin" ]]; then
+    echo "[BLOCKED] Official macOS bootable USB creation requires macOS createinstallmedia."
+    return 2
+  fi
+
+  [[ -n "$volume_name" ]] || die "Missing --volume-name"
+  volume="/Volumes/$volume_name"
+  [[ -d "$volume" ]] || die "Volume not found: $volume"
+
+  if [[ -z "$app_path" ]]; then
+    app_path="$(find /Applications -maxdepth 1 -type d -name 'Install macOS*.app' | sort | tail -n1 || true)"
+  fi
+
+  [[ -d "$app_path" ]] || die "Install macOS.app not found. Use --app-path PATH."
+  tool="$app_path/Contents/Resources/createinstallmedia"
+  [[ -x "$tool" ]] || die "createinstallmedia not found at: $tool"
+
+  confirm ERASE_MACOS_USB "This will erase the macOS USB volume: $volume"
+  run "$tool" --volume "$volume" --nointeraction
+
+  echo "[OK] macOS bootable installer prepared on: $volume"
+}
+
 preflight_partition() {
   ui_section "Preflight partition safety check"
 
@@ -973,6 +1336,15 @@ main() {
     analyze) analyze ;;
     doctor) doctor ;;
     preflight-partition) preflight_partition "$@" ;;
+    installer-doctor) installer_doctor ;;
+    download-ubuntu) download_ubuntu "$@" ;;
+    verify-iso-sha256) verify_iso_sha256 "$@" ;;
+    download-windows) download_windows "$@" ;;
+    prepare-usb-dd) prepare_usb_dd "$@" ;;
+    prepare-usb-ubuntu) prepare_usb_ubuntu "$@" ;;
+    prepare-usb-windows) prepare_usb_windows "$@" ;;
+    download-macos) download_macos "$@" ;;
+    prepare-usb-macos) prepare_usb_macos "$@" ;;
     backup-efi) backup_efi ;;
     boot-report) boot_report ;;
     partition) partition_cmd "$@" ;;
