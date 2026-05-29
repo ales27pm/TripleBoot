@@ -27,7 +27,7 @@ APT_DEPS=(
   bash coreutils util-linux gawk sed grep findutils file jq curl wget unzip zip git rsync
   gdisk parted dosfstools e2fsprogs ntfs-3g efibootmgr mokutil pciutils usbutils dmidecode
   lshw hwinfo acpica-tools fwupd nvme-cli qemu-utils qemu-system-x86 ovmf python3 python3-pip
-  alsa-utils refind shellcheck
+  alsa-utils shellcheck
 )
 
 if [[ -t 1 ]]; then
@@ -146,6 +146,7 @@ ${BOLD}TripleBoot AIO v$VERSION${RESET}
 Commands:
   plan
   install-deps
+  install-refind
   scan
   analyze
   backup-efi
@@ -206,6 +207,18 @@ install_deps() {
   export DEBIAN_FRONTEND=noninteractive
   run apt-get update
   run apt-get install -y "${APT_DEPS[@]}"
+}
+
+install_refind() {
+  ui_section "Installing rEFInd"
+  need_root
+  assert_uefi
+  have apt-get || die "Only apt-based systems are automated here."
+  export DEBIAN_FRONTEND=noninteractive
+  warn "This command intentionally installs rEFInd and may create/change UEFI boot entries."
+  confirm INSTALL_REFIND "Installing rEFInd can modify UEFI boot entries."
+  run apt-get update
+  run apt-get install -y refind
 }
 
 scan() {
@@ -355,7 +368,11 @@ boot_report() {
   for esp in "${esps[@]:-}"; do
     mnt="$(mktemp -d)"
     echo "--- $esp ---"
-    if mount -o ro "$esp" "$mnt"; then
+    local existing_mount=""
+    existing_mount="$(findmnt -n -o TARGET --source "$esp" 2>/dev/null | head -n1 || true)"
+    if [[ -n "$existing_mount" ]]; then
+      find "$existing_mount" -maxdepth 6 -type f -iname '*.efi' | sed "s#^$existing_mount##" | sort
+    elif mount -o ro "$esp" "$mnt"; then
       find "$mnt" -maxdepth 6 -type f -iname '*.efi' | sed "s#^$mnt##" | sort
       umount "$mnt"
     fi
@@ -671,6 +688,7 @@ main() {
     help|-h|--help) usage ;;
     plan) plan ;;
     install-deps) install_deps ;;
+    install-refind) install_refind ;;
     scan) scan ;;
     analyze) analyze ;;
     backup-efi) backup_efi ;;
