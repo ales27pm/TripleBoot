@@ -762,9 +762,9 @@ preflight_partition() {
 
   echo
   echo "=== DATA partition protection ==="
-  data_matches="$(lsblk -rpno NAME,PKNAME,PARTLABEL,LABEL,FSTYPE,MOUNTPOINTS | awk '$3 == "DATA" || $4 == "DATA" {print $0}' || true)"
+  data_matches="$(lsblk -rpno NAME,PKNAME,PARTLABEL,LABEL | awk '($3 == "DATA" || $4 == "DATA") {print $1 "\\t" $2}' || true)"
   if [[ -n "$data_matches" ]]; then
-    while read -r part parent _rest; do
+    while IFS=$'\\t' read -r part parent; do
       [[ -n "$part" ]] || continue
       [[ -n "$parent" && "$parent" != /dev/* ]] && parent="/dev/$parent"
       echo "[WARN] DATA partition detected: $part"
