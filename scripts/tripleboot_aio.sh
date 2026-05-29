@@ -240,6 +240,7 @@ scan() {
   run bash -c "aplay -l > '$raw/aplay.txt'" || true
   if have acpidump; then
     mkdir -p "$raw/acpi"
+    rm -f "$raw/acpi"/acpi.dump "$raw/acpi"/*.dat
     run bash -c "cd '$raw/acpi' && acpidump -b -o acpi.dump" || true
   fi
   python3 - "$raw" "$INVENTORY_DIR/parsed/inventory.json" <<'PY_SCAN'
