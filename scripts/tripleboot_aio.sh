@@ -688,7 +688,6 @@ doctor() {
   local efi_count="0"
   local boot_order=""
   local rootdisk=""
-  local data_parts=""
 
   echo "=== System mode ==="
   if is_uefi; then
