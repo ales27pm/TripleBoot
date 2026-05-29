@@ -762,18 +762,22 @@ preflight_partition() {
 
   echo
   echo "=== DATA partition protection ==="
-  data_matches="$(lsblk -rpno NAME,PKNAME,PARTLABEL,LABEL | awk '($3 == "DATA" || $4 == "DATA") {print $1 "\\t" $2}' || true)"
-  if [[ -n "$data_matches" ]]; then
-    while IFS=$'\\t' read -r part parent; do
-      [[ -n "$part" ]] || continue
-      [[ -n "$parent" && "$parent" != /dev/* ]] && parent="/dev/$parent"
-      echo "[WARN] DATA partition detected: $part"
-      echo "       Parent disk: ${parent:-unknown}"
-      if [[ "$parent" == "$ubuntu_disk" || "$parent" == "$winmac_disk" ]]; then
-        echo "[BLOCKED] Target disk contains DATA: $parent"
+  mapfile -t data_partitions < <(lsblk -rpno NAME,PARTLABEL,LABEL | awk '$2 == "DATA" || $3 == "DATA" {print $1}' || true)
+  if [[ "${#data_partitions[@]}" -gt 0 ]]; then
+    local data_partition data_parent
+    for data_partition in "${data_partitions[@]}"; do
+      [[ -n "$data_partition" ]] || continue
+      data_parent="$(lsblk -no PKNAME "$data_partition" 2>/dev/null | head -n1 || true)"
+      if [[ -n "$data_parent" && "$data_parent" != /dev/* ]]; then
+        data_parent="/dev/$data_parent"
+      fi
+      echo "[WARN] DATA partition detected: $data_partition"
+      echo "       Parent disk: ${data_parent:-unknown}"
+      if [[ "$data_parent" == "$ubuntu_disk" || "$data_parent" == "$winmac_disk" ]]; then
+        echo "[BLOCKED] Target disk contains DATA: $data_parent"
         failures=$((failures + 1))
       fi
-    done <<< "$data_matches"
+    done
   else
     echo "[OK] No DATA partition detected"
   fi
