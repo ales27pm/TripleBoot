@@ -168,6 +168,11 @@ Commands:
   osx-kvm-create-disk [--dir DIR] [--size 256G]
   osx-kvm-boot [--dir DIR]
   osx-kvm-offline-iso --pkg FILE [--dir DIR]
+  download-ventoy [--version latest]
+  prepare-usb-ventoy --usb-disk DISK --yes-destroy
+  stage-tripleboot-usb --usb-disk DISK [--ubuntu-iso FILE] [--windows-iso FILE] [--osx-kvm-dir DIR]
+  build-tripleboot-usb --usb-disk DISK --windows-iso FILE|--windows-iso-url URL [--ubuntu-version 26.04] [--include-osx-kvm] --yes-destroy
+  tripleboot-usb-status --usb-disk DISK
   backup-efi
   boot-report
   partition --ubuntu-disk DISK --winmac-disk DISK --yes-destroy
@@ -1051,6 +1056,369 @@ prepare_usb_macos() {
 }
 
 
+
+download_ventoy() {
+  local version="latest"
+  local url=""
+  local out=""
+  local extract_dir="$DOWNLOAD_DIR/ventoy"
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --version) version="$2"; shift 2 ;;
+      *) die "Unknown download-ventoy arg: $1" ;;
+    esac
+  done
+
+  mkdir -p "$extract_dir"
+
+  if [[ "$version" == "latest" ]]; then
+    url="$(github_latest_asset_url ventoy/Ventoy 'ventoy-.*-linux\.tar\.gz$')"
+    out="$DOWNLOAD_DIR/ventoy/ventoy-latest-linux.tar.gz"
+  else
+    url="https://github.com/ventoy/Ventoy/releases/download/v${version}/ventoy-${version}-linux.tar.gz"
+    out="$DOWNLOAD_DIR/ventoy/ventoy-${version}-linux.tar.gz"
+  fi
+
+  download_url "$url" "$out"
+
+  rm -rf "$extract_dir/extracted"
+  mkdir -p "$extract_dir/extracted"
+  run tar -xzf "$out" -C "$extract_dir/extracted"
+
+  echo "[OK] Ventoy downloaded and extracted:"
+  find "$extract_dir/extracted" -maxdepth 2 -type f -name Ventoy2Disk.sh -print
+}
+
+ventoy_tool_path() {
+  local tool=""
+  tool="$(find "$DOWNLOAD_DIR/ventoy/extracted" -maxdepth 3 -type f -name Ventoy2Disk.sh -print -quit 2>/dev/null || true)"
+  [[ -n "$tool" ]] || die "Ventoy2Disk.sh not found. Run: download-ventoy"
+  printf '%s\n' "$tool"
+}
+
+prepare_usb_ventoy() {
+  need_root
+
+  local usb=""
+  local secure_boot=false
+  local gpt=true
+  local tool=""
+  local args=()
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --usb-disk) usb="$2"; shift 2 ;;
+      --secure-boot) secure_boot=true; shift ;;
+      --mbr) gpt=false; shift ;;
+      --yes-destroy) YES_DESTROY=true; shift ;;
+      *) die "Unknown prepare-usb-ventoy arg: $1" ;;
+    esac
+  done
+
+  [[ -n "$usb" ]] || die "Missing --usb-disk"
+  assert_disk "$usb"
+  protect_running_root "$usb"
+  [[ "$YES_DESTROY" == true ]] || die "Ventoy install is destructive. Add --yes-destroy."
+
+  tool="$(ventoy_tool_path)"
+
+  lsblk -e7 -o NAME,SIZE,TYPE,FSTYPE,LABEL,PARTLABEL,MOUNTPOINTS,MODEL,TRAN
+  confirm INSTALL_VENTOY "This will erase USB disk $usb and install Ventoy."
+
+  unmount_disk "$usb"
+
+  args=(-I)
+  if [[ "$gpt" == true ]]; then
+    args+=(-g)
+  fi
+  if [[ "$secure_boot" == true ]]; then
+    args+=(-s)
+  fi
+
+  run bash "$tool" "${args[@]}" "$usb"
+  run partprobe "$usb"
+  sleep 3
+
+  echo "[OK] Ventoy installed on: $usb"
+}
+
+ventoy_data_partition() {
+  local usb="$1"
+  local part=""
+
+  part="$(lsblk -rpno NAME,LABEL "$usb" 2>/dev/null | awk '$2 == "Ventoy" {print $1; exit}' || true)"
+  if [[ -z "$part" ]]; then
+    part="$(part_name "$usb" 1)"
+  fi
+
+  [[ -b "$part" ]] || die "Could not detect Ventoy data partition for $usb"
+  printf '%s\n' "$part"
+}
+
+mount_ventoy_data_rw() {
+  local usb="$1"
+  local part=""
+  local mnt=""
+
+  part="$(ventoy_data_partition "$usb")"
+  mnt="$(mktemp -d)"
+
+  run mount "$part" "$mnt"
+  printf '%s\n' "$mnt"
+}
+
+stage_tripleboot_usb() {
+  need_root
+
+  local usb=""
+  local ubuntu_iso=""
+  local windows_iso=""
+  local osx_kvm_dir=""
+  local include_osx_kvm=false
+  local include_repo_docs=true
+  local mnt=""
+  local repo_root=""
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --usb-disk) usb="$2"; shift 2 ;;
+      --ubuntu-iso) ubuntu_iso="$2"; shift 2 ;;
+      --windows-iso) windows_iso="$2"; shift 2 ;;
+      --osx-kvm-dir) osx_kvm_dir="$2"; include_osx_kvm=true; shift 2 ;;
+      --include-osx-kvm) include_osx_kvm=true; shift ;;
+      --no-repo-docs) include_repo_docs=false; shift ;;
+      *) die "Unknown stage-tripleboot-usb arg: $1" ;;
+    esac
+  done
+
+  [[ -n "$usb" ]] || die "Missing --usb-disk"
+  assert_disk "$usb"
+  protect_running_root "$usb"
+
+  [[ -z "$ubuntu_iso" || -f "$ubuntu_iso" ]] || die "Ubuntu ISO not found: $ubuntu_iso"
+  [[ -z "$windows_iso" || -f "$windows_iso" ]] || die "Windows ISO not found: $windows_iso"
+
+  if [[ "$include_osx_kvm" == true ]]; then
+    [[ -n "$osx_kvm_dir" ]] || osx_kvm_dir="$(osx_kvm_dir_default)"
+    [[ -d "$osx_kvm_dir" ]] || die "OSX-KVM dir not found: $osx_kvm_dir"
+  fi
+
+  mnt="$(mount_ventoy_data_rw "$usb")"
+
+  mkdir -p "$mnt/ISO/Ubuntu" "$mnt/ISO/Windows" "$mnt/macOS/OSX-KVM" "$mnt/TripleBoot"
+
+  if [[ -n "$ubuntu_iso" ]]; then
+    run rsync -ah --info=progress2 "$ubuntu_iso" "$mnt/ISO/Ubuntu/"
+  fi
+
+  if [[ -n "$windows_iso" ]]; then
+    run rsync -ah --info=progress2 "$windows_iso" "$mnt/ISO/Windows/"
+  fi
+
+  if [[ "$include_osx_kvm" == true ]]; then
+    echo "[INFO] Staging OSX-KVM assets. This is VM/recovery workflow data, not official Apple createinstallmedia USB."
+    run rsync -ah --info=progress2 \
+      --exclude='.git' \
+      --exclude='mac_hdd_ng.img' \
+      --exclude='*.qcow2' \
+      "$osx_kvm_dir"/ "$mnt/macOS/OSX-KVM/"
+  fi
+
+  repo_root="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+  if [[ "$include_repo_docs" == true && -d "$repo_root" ]]; then
+    run rsync -ah \
+      --exclude='.git' \
+      --exclude='downloads' \
+      --exclude='build' \
+      --exclude='inventory' \
+      --exclude='backups' \
+      "$repo_root"/ "$mnt/TripleBoot/repo/"
+  fi
+
+  cat > "$mnt/TripleBoot/README-FIRST.txt" <<'EOF_README'
+TripleBoot USB
+
+This USB is built as a Ventoy multiboot installer kit.
+
+Boot menu:
+- Ubuntu ISO is under /ISO/Ubuntu
+- Windows ISO is under /ISO/Windows
+
+macOS:
+- Official full macOS USB creation requires macOS + createinstallmedia.
+- Linux-hosted macOS flow is staged under /macOS/OSX-KVM as a VM/OpenCore recovery workflow.
+- Use OSX-KVM on Linux to install macOS into a VM disk.
+- For physical Hackintosh/OpenCore work, review OpenCore configuration manually.
+
+Safety:
+- Do not wipe disks until preflight-partition passes.
+- If DATA exists, preserve it unless explicitly intentionally wiping it.
+- Keep EFI backups before changing bootloaders.
+EOF_README
+
+  sync
+  run umount "$mnt"
+  rmdir "$mnt" || true
+
+  echo "[OK] TripleBoot USB payload staged on: $usb"
+}
+
+tripleboot_usb_status() {
+  need_root
+
+  local usb=""
+  local part=""
+  local mnt=""
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --usb-disk) usb="$2"; shift 2 ;;
+      *) die "Unknown tripleboot-usb-status arg: $1" ;;
+    esac
+  done
+
+  [[ -n "$usb" ]] || die "Missing --usb-disk"
+  assert_disk "$usb"
+
+  echo "=== USB disk ==="
+  lsblk -e7 -o NAME,SIZE,TYPE,FSTYPE,LABEL,PARTLABEL,MOUNTPOINTS,MODEL,TRAN "$usb"
+
+  part="$(ventoy_data_partition "$usb")"
+  echo
+  echo "Ventoy data partition: $part"
+
+  mnt="$(mktemp -d)"
+  run mount "$part" "$mnt"
+
+  echo
+  echo "=== Payload files ==="
+  find "$mnt" -maxdepth 4 -type f \
+    \( -iname '*.iso' -o -iname '*.img' -o -iname '*.dmg' -o -iname 'README-FIRST.txt' \) \
+    -printf '%P\n' | sort
+
+  echo
+  echo "=== Expected directories ==="
+  for d in ISO/Ubuntu ISO/Windows macOS/OSX-KVM TripleBoot; do
+    if [[ -d "$mnt/$d" ]]; then
+      echo "[OK] $d"
+    else
+      echo "[WARN] Missing $d"
+    fi
+  done
+
+  run umount "$mnt"
+  rmdir "$mnt" || true
+}
+
+build_tripleboot_usb() {
+  need_root
+
+  local usb=""
+  local ubuntu_version="26.04"
+  local ubuntu_edition="desktop"
+  local ubuntu_arch="amd64"
+  local ubuntu_iso=""
+  local windows_iso=""
+  local windows_iso_url=""
+  local staged_windows_iso=""
+  local include_osx_kvm=false
+  local osx_kvm_dir=""
+  local skip_downloads=false
+  local secure_boot=false
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --usb-disk) usb="$2"; shift 2 ;;
+      --ubuntu-version) ubuntu_version="$2"; shift 2 ;;
+      --ubuntu-edition) ubuntu_edition="$2"; shift 2 ;;
+      --ubuntu-arch) ubuntu_arch="$2"; shift 2 ;;
+      --ubuntu-iso) ubuntu_iso="$2"; shift 2 ;;
+      --windows-iso) windows_iso="$2"; shift 2 ;;
+      --windows-iso-url) windows_iso_url="$2"; shift 2 ;;
+      --include-osx-kvm) include_osx_kvm=true; shift ;;
+      --osx-kvm-dir) osx_kvm_dir="$2"; include_osx_kvm=true; shift 2 ;;
+      --skip-downloads) skip_downloads=true; shift ;;
+      --secure-boot) secure_boot=true; shift ;;
+      --yes-destroy) YES_DESTROY=true; shift ;;
+      *) die "Unknown build-tripleboot-usb arg: $1" ;;
+    esac
+  done
+
+  [[ -n "$usb" ]] || die "Missing --usb-disk"
+  assert_disk "$usb"
+  protect_running_root "$usb"
+  [[ "$YES_DESTROY" == true ]] || die "USB build is destructive. Add --yes-destroy."
+
+  if [[ -z "$windows_iso" && -z "$windows_iso_url" ]]; then
+    die "Windows installer requires --windows-iso FILE or --windows-iso-url URL."
+  fi
+
+  echo "=== TripleBoot USB build plan ==="
+  echo "USB disk: $usb"
+  echo "Ubuntu: ${ubuntu_version} ${ubuntu_edition} ${ubuntu_arch}"
+  echo "Windows ISO file: ${windows_iso:-not provided}"
+  echo "Windows ISO URL: ${windows_iso_url:+provided}"
+  echo "Include OSX-KVM assets: $include_osx_kvm"
+  echo "Secure Boot support in Ventoy: $secure_boot"
+  echo
+  echo "[DANGER] This will erase the selected USB disk, install Ventoy, and stage installers."
+  confirm BUILD_TRIPLEBOOT_USB "Confirm full TripleBoot USB build on $usb."
+
+  if [[ "$skip_downloads" != true ]]; then
+    if [[ -z "$ubuntu_iso" ]]; then
+      download_ubuntu --version "$ubuntu_version" --edition "$ubuntu_edition" --arch "$ubuntu_arch"
+      case "$ubuntu_edition" in
+        desktop) ubuntu_iso="$DOWNLOAD_DIR/installers/ubuntu/ubuntu-${ubuntu_version}-desktop-${ubuntu_arch}.iso" ;;
+        server|live-server) ubuntu_iso="$DOWNLOAD_DIR/installers/ubuntu/ubuntu-${ubuntu_version}-live-server-${ubuntu_arch}.iso" ;;
+      esac
+    fi
+
+    if [[ -n "$windows_iso_url" ]]; then
+      download_windows --iso-url "$windows_iso_url" --output-name Windows11.iso
+      staged_windows_iso="$DOWNLOAD_DIR/installers/windows/Windows11.iso"
+    elif [[ -n "$windows_iso" ]]; then
+      download_windows --iso-file "$windows_iso" --output-name "$(basename "$windows_iso")"
+      staged_windows_iso="$DOWNLOAD_DIR/installers/windows/$(basename "$windows_iso")"
+    fi
+
+    if [[ "$include_osx_kvm" == true ]]; then
+      [[ -n "$osx_kvm_dir" ]] || osx_kvm_dir="$(osx_kvm_dir_default)"
+      osx_kvm_clone --dir "$osx_kvm_dir"
+      if [[ ! -f "$osx_kvm_dir/BaseSystem.img" ]]; then
+        echo "[INFO] OSX-KVM BaseSystem.img not found."
+        echo "[INFO] Run osx-kvm-fetch and osx-kvm-convert manually if you want macOS recovery assets staged."
+      fi
+    fi
+  else
+    staged_windows_iso="$windows_iso"
+  fi
+
+  [[ -n "$ubuntu_iso" && -f "$ubuntu_iso" ]] || die "Ubuntu ISO missing after download/stage: $ubuntu_iso"
+  [[ -n "$staged_windows_iso" && -f "$staged_windows_iso" ]] || die "Windows ISO missing after download/stage: $staged_windows_iso"
+
+  download_ventoy
+
+  if [[ "$secure_boot" == true ]]; then
+    prepare_usb_ventoy --usb-disk "$usb" --secure-boot --yes-destroy
+  else
+    prepare_usb_ventoy --usb-disk "$usb" --yes-destroy
+  fi
+
+  if [[ "$include_osx_kvm" == true ]]; then
+    stage_tripleboot_usb --usb-disk "$usb" --ubuntu-iso "$ubuntu_iso" --windows-iso "$staged_windows_iso" --osx-kvm-dir "${osx_kvm_dir:-$(osx_kvm_dir_default)}"
+  else
+    stage_tripleboot_usb --usb-disk "$usb" --ubuntu-iso "$ubuntu_iso" --windows-iso "$staged_windows_iso"
+  fi
+
+  tripleboot_usb_status --usb-disk "$usb"
+
+  echo
+  echo "[OK] TripleBoot USB installer kit complete."
+  echo "[INFO] Boot the USB and Ventoy should list Ubuntu and Windows ISOs."
+  echo "[INFO] macOS assets, if included, are under /macOS/OSX-KVM for VM/OpenCore recovery workflow."
+}
+
 osx_kvm_dir_default() {
   local owner="${SUDO_USER:-${USER:-}}"
   local owner_home=""
@@ -1595,6 +1963,11 @@ main() {
     osx-kvm-create-disk) osx_kvm_create_disk "$@" ;;
     osx-kvm-boot) osx_kvm_boot "$@" ;;
     osx-kvm-offline-iso) osx_kvm_offline_iso "$@" ;;
+    download-ventoy) download_ventoy "$@" ;;
+    prepare-usb-ventoy) prepare_usb_ventoy "$@" ;;
+    stage-tripleboot-usb) stage_tripleboot_usb "$@" ;;
+    build-tripleboot-usb) build_tripleboot_usb "$@" ;;
+    tripleboot-usb-status) tripleboot_usb_status "$@" ;;
     backup-efi) backup_efi ;;
     boot-report) boot_report ;;
     partition) partition_cmd "$@" ;;
