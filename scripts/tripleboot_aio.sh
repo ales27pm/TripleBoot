@@ -341,7 +341,11 @@ backup_efi() {
     mnt="$(mktemp -d)"
     safe="$(printf '%s' "$esp" | sed 's#[/:]#_#g')"
     mkdir -p "$dest/$safe"
-    if run mount -o ro "$esp" "$mnt"; then
+    local existing_mount=""
+    existing_mount="$(findmnt -n -o TARGET --source "$esp" 2>/dev/null | head -n1 || true)"
+    if [[ -n "$existing_mount" ]]; then
+      run rsync -aHAX --numeric-ids "$existing_mount"/ "$dest/$safe"/
+    elif run mount -o ro "$esp" "$mnt"; then
       run rsync -aHAX --numeric-ids "$mnt"/ "$dest/$safe"/
       run umount "$mnt"
     fi
