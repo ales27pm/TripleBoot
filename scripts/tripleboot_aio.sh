@@ -151,7 +151,7 @@ Commands:
   scan
   analyze
   doctor
-  preflight-partition --ubuntu-disk DISK --winmac-disk DISK
+  preflight-partition --ubuntu-disk DISK --winmac-disk DISK [--allow-wipe-data-on DISK]
   backup-efi
   boot-report
   partition --ubuntu-disk DISK --winmac-disk DISK --yes-destroy
@@ -697,11 +697,15 @@ preflight_partition() {
   local data_matches=""
   local latest_backup=""
   local efi_count="0"
+  local -a allow_data_wipe_disks=()
+  local allowed_disk=""
+  local data_wipe_allowed=false
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --ubuntu-disk) ubuntu_disk="$2"; shift 2 ;;
       --winmac-disk) winmac_disk="$2"; shift 2 ;;
+      --allow-wipe-data-on) allow_data_wipe_disks+=("$2"); shift 2 ;;
       *) die "Unknown preflight-partition arg: $1" ;;
     esac
   done
@@ -711,6 +715,9 @@ preflight_partition() {
 
   echo "Ubuntu target disk: $ubuntu_disk"
   echo "Windows/macOS target disk: $winmac_disk"
+  if [[ "${#allow_data_wipe_disks[@]}" -gt 0 ]]; then
+    echo "Explicit DATA wipe override(s): ${allow_data_wipe_disks[*]}"
+  fi
   echo
 
   echo "=== UEFI / Secure Boot ==="
@@ -774,8 +781,21 @@ preflight_partition() {
       echo "[WARN] DATA partition detected: $data_partition"
       echo "       Parent disk: ${data_parent:-unknown}"
       if [[ "$data_parent" == "$ubuntu_disk" || "$data_parent" == "$winmac_disk" ]]; then
-        echo "[BLOCKED] Target disk contains DATA: $data_parent"
-        failures=$((failures + 1))
+        data_wipe_allowed=false
+        for allowed_disk in "${allow_data_wipe_disks[@]}"; do
+          if [[ "$allowed_disk" == "$data_parent" ]]; then
+            data_wipe_allowed=true
+            break
+          fi
+        done
+
+        if [[ "$data_wipe_allowed" == true ]]; then
+          echo "[DANGER-ACK] DATA wipe override accepted for: $data_parent"
+        else
+          echo "[BLOCKED] Target disk contains DATA: $data_parent"
+          echo "          To allow this intentionally, rerun with: --allow-wipe-data-on $data_parent"
+          failures=$((failures + 1))
+        fi
       fi
     done
   else
