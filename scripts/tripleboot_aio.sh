@@ -742,7 +742,7 @@ doctor() {
     echo "[WARN] Could not detect running root disk"
   fi
 
-  data_parts="$(lsblk -rpno NAME,LABEL,FSTYPE,MOUNTPOINTS | awk '$2 == "DATA" {print $0}' || true)"
+  data_parts="$(lsblk -rpno NAME,PARTLABEL,LABEL,FSTYPE,MOUNTPOINTS | awk '$2 == "DATA" || $3 == "DATA" {print $0}' || true)"
   if [[ -n "$data_parts" ]]; then
     echo "[WARN] DATA partition detected. Do not partition its parent disk unless you intend to wipe it:"
     echo "$data_parts"
