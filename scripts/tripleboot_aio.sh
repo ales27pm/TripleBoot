@@ -151,6 +151,7 @@ Commands:
   scan
   analyze
   doctor
+  preflight-partition --ubuntu-disk DISK --winmac-disk DISK
   backup-efi
   boot-report
   partition --ubuntu-disk DISK --winmac-disk DISK --yes-destroy
@@ -678,6 +679,154 @@ restore_efi() {
 }
 
 
+
+preflight_partition() {
+  ui_section "Preflight partition safety check"
+
+  need_root
+
+  local ubuntu_disk=""
+  local winmac_disk=""
+  local rootdisk=""
+  local failures=0
+  local warnings=0
+  local disk=""
+  local part=""
+  local parent=""
+  local mounted_parts=""
+  local data_matches=""
+  local latest_backup=""
+  local efi_count="0"
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --ubuntu-disk) ubuntu_disk="$2"; shift 2 ;;
+      --winmac-disk) winmac_disk="$2"; shift 2 ;;
+      *) die "Unknown preflight-partition arg: $1" ;;
+    esac
+  done
+
+  [[ -n "$ubuntu_disk" ]] || die "Missing --ubuntu-disk"
+  [[ -n "$winmac_disk" ]] || die "Missing --winmac-disk"
+
+  echo "Ubuntu target disk: $ubuntu_disk"
+  echo "Windows/macOS target disk: $winmac_disk"
+  echo
+
+  echo "=== UEFI / Secure Boot ==="
+  if is_uefi; then
+    echo "[OK] Booted in UEFI mode"
+  else
+    echo "[BLOCKED] Not booted in UEFI mode"
+    failures=$((failures + 1))
+  fi
+
+  if have mokutil; then
+    if mokutil --sb-state 2>/dev/null | grep -qi 'disabled'; then
+      echo "[OK] Secure Boot disabled"
+    else
+      echo "[WARN] Secure Boot may be enabled or unknown"
+      warnings=$((warnings + 1))
+    fi
+  else
+    echo "[WARN] mokutil unavailable"
+    warnings=$((warnings + 1))
+  fi
+
+  echo
+  echo "=== Disk identity ==="
+  for disk in "$ubuntu_disk" "$winmac_disk"; do
+    if [[ -b "$disk" ]] && [[ "$(lsblk -dn -o TYPE "$disk" 2>/dev/null || true)" == "disk" ]]; then
+      echo "[OK] Whole disk exists: $disk"
+    else
+      echo "[BLOCKED] Not a valid whole disk: $disk"
+      failures=$((failures + 1))
+    fi
+  done
+
+  if [[ "$ubuntu_disk" == "$winmac_disk" ]]; then
+    echo "[BLOCKED] Ubuntu disk and Windows/macOS disk are identical"
+    failures=$((failures + 1))
+  fi
+
+  echo
+  echo "=== Running root protection ==="
+  rootdisk="$(root_parent_disk || true)"
+  echo "Running root disk: ${rootdisk:-unknown}"
+  for disk in "$ubuntu_disk" "$winmac_disk"; do
+    if [[ -n "$rootdisk" && "$disk" == "$rootdisk" ]]; then
+      echo "[BLOCKED] $disk is the currently running root disk"
+      failures=$((failures + 1))
+    fi
+  done
+
+  echo
+  echo "=== DATA partition protection ==="
+  data_matches="$(lsblk -rpno NAME,PKNAME,PARTLABEL,LABEL,FSTYPE,MOUNTPOINTS | awk '$3 == "DATA" || $4 == "DATA" {print $0}' || true)"
+  if [[ -n "$data_matches" ]]; then
+    while read -r part parent _rest; do
+      [[ -n "$part" ]] || continue
+      [[ -n "$parent" && "$parent" != /dev/* ]] && parent="/dev/$parent"
+      echo "[WARN] DATA partition detected: $part"
+      echo "       Parent disk: ${parent:-unknown}"
+      if [[ "$parent" == "$ubuntu_disk" || "$parent" == "$winmac_disk" ]]; then
+        echo "[BLOCKED] Target disk contains DATA: $parent"
+        failures=$((failures + 1))
+      fi
+    done <<< "$data_matches"
+  else
+    echo "[OK] No DATA partition detected"
+  fi
+
+  echo
+  echo "=== Mounted partition check ==="
+  for disk in "$ubuntu_disk" "$winmac_disk"; do
+    mounted_parts="$(lsblk -rpno NAME,MOUNTPOINTS "$disk" 2>/dev/null | awk 'NF > 1 {print $0}' || true)"
+    if [[ -n "$mounted_parts" ]]; then
+      echo "[WARN] Mounted partitions found under $disk:"
+      echo "$mounted_parts"
+      warnings=$((warnings + 1))
+    else
+      echo "[OK] No mounted partitions under $disk"
+    fi
+  done
+
+  echo
+  echo "=== EFI backup check ==="
+  latest_backup="$(find "$BACKUP_ROOT" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | sort | tail -n1 || true)"
+  if [[ -n "$latest_backup" ]]; then
+    efi_count="$(find "$latest_backup" -type f -iname '*.efi' 2>/dev/null | wc -l | tr -d ' ')"
+    echo "Latest backup: $latest_backup"
+    echo "EFI file count: $efi_count"
+    if [[ "$efi_count" -gt 0 ]]; then
+      echo "[OK] EFI backup exists and contains loaders"
+    else
+      echo "[BLOCKED] Latest EFI backup contains no EFI files"
+      failures=$((failures + 1))
+    fi
+  else
+    echo "[BLOCKED] No EFI backup found"
+    failures=$((failures + 1))
+  fi
+
+  echo
+  echo "=== Windows / BitLocker reminder ==="
+  echo "[WARN] If Windows/BitLocker exists or will be installed, keep the recovery key and suspend BitLocker before bootloader edits."
+  warnings=$((warnings + 1))
+
+  echo
+  echo "=== Preflight result ==="
+  echo "Failures: $failures"
+  echo "Warnings: $warnings"
+
+  if [[ "$failures" -gt 0 ]]; then
+    echo "[BLOCKED] Partitioning should not proceed."
+    return 2
+  fi
+
+  echo "[OK] No hard blockers detected. Still use a live USB before destructive partitioning."
+}
+
 doctor() {
   ui_section "TripleBoot doctor"
 
@@ -801,6 +950,7 @@ main() {
     scan) scan ;;
     analyze) analyze ;;
     doctor) doctor ;;
+    preflight-partition) preflight_partition "$@" ;;
     backup-efi) backup_efi ;;
     boot-report) boot_report ;;
     partition) partition_cmd "$@" ;;
