@@ -692,9 +692,7 @@ preflight_partition() {
   local warnings=0
   local disk=""
   local part=""
-  local parent=""
   local mounted_parts=""
-  local data_matches=""
   local latest_backup=""
   local efi_count="0"
   local -a allow_data_wipe_disks=()
