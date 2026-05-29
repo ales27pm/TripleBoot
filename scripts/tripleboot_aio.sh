@@ -800,7 +800,7 @@ download_ubuntu() {
   download_url "$iso_url" "$dest"
   download_url "$sha_url" "$sha_file"
 
-  grep " ${file}$" "$sha_file" > "$check_file" || die "Could not find $file inside SHA256SUMS"
+  grep -E "[ *]${file}$" "$sha_file" > "$check_file" || die "Could not find $file inside SHA256SUMS"
   (
     cd "$DOWNLOAD_DIR/installers/ubuntu"
     sha256sum -c "$(basename "$check_file")"
@@ -829,7 +829,7 @@ verify_iso_sha256() {
   iso_base="$(basename "$iso")"
   check_file="$(mktemp)"
 
-  grep " ${iso_base}$" "$sha256_file" > "$check_file" || die "Could not find $iso_base in $sha256_file"
+  grep -E "[ *]${iso_base}$" "$sha256_file" > "$check_file" || die "Could not find $iso_base in $sha256_file"
   (
     cd "$(dirname "$iso")"
     sha256sum -c "$check_file"
@@ -1052,7 +1052,23 @@ prepare_usb_macos() {
 
 
 osx_kvm_dir_default() {
-  printf '%s\n' "${OSX_KVM_DIR:-$HOME/OSX-KVM}"
+  local owner="${SUDO_USER:-${USER:-}}"
+  local owner_home=""
+
+  if [[ -n "${OSX_KVM_DIR:-}" ]]; then
+    printf '%s\n' "$OSX_KVM_DIR"
+    return 0
+  fi
+
+  if [[ -n "$owner" && "$owner" != "root" ]]; then
+    owner_home="$(getent passwd "$owner" | cut -d: -f6 || true)"
+  fi
+
+  if [[ -n "$owner_home" ]]; then
+    printf '%s\n' "$owner_home/OSX-KVM"
+  else
+    printf '%s\n' "$HOME/OSX-KVM"
+  fi
 }
 
 osx_kvm_doctor() {
