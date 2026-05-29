@@ -31,3 +31,6 @@ EFI/
 .DS_Store
 .vscode/
 .idea/
+# Accidental ACPI dumps from acpidump
+*.dat
+
