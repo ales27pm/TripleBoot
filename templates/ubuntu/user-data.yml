@@ -1,0 +1,38 @@
+#cloud-config
+autoinstall:
+  version: 1
+  refresh-installer:
+    update: true
+  locale: "{{ locale }}"
+  keyboard:
+    layout: "{{ keyboard }}"
+  timezone: "{{ timezone }}"
+  identity:
+    hostname: "{{ machine_id }}-ubuntu"
+    username: "{{ username }}"
+    realname: "{{ full_name }}"
+    password: "{{ password_hash }}"
+  ssh:
+    install-server: true
+    allow-pw: true
+  network:
+    version: 2
+    ethernets:
+      any:
+        match:
+          name: "e*"
+        dhcp4: true
+  storage:
+    layout:
+      name: direct
+  packages:
+    - curl
+    - git
+    - vim
+    - openssh-server
+    - build-essential
+  late-commands:
+    - curtin in-target --target=/target -- apt-get update
+    - curtin in-target --target=/target -- apt-get install -y efibootmgr
+  user-data:
+    disable_root: true
