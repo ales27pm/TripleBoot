@@ -7,7 +7,23 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ENGINE="$REPO_ROOT/scripts/tripleboot_profile_engine.py"
 AIO="$REPO_ROOT/scripts/tripleboot_aio.sh"
 DEFAULT_PROFILE="$REPO_ROOT/profiles/pc-27pm.yml"
-DEFAULT_OUTPUT="${TRIPLEBOOT_AUTONOMOUS_OUTPUT:-$HOME/tripleboot-aio/build/autonomous-payload}"
+
+user_home() {
+  local owner="${SUDO_USER:-${USER:-}}"
+  local owner_home=""
+
+  if [[ -n "$owner" && "$owner" != "root" ]]; then
+    owner_home="$(getent passwd "$owner" | cut -d: -f6 || true)"
+  fi
+
+  if [[ -n "$owner_home" ]]; then
+    printf '%s\n' "$owner_home"
+  else
+    printf '%s\n' "$HOME"
+  fi
+}
+
+DEFAULT_OUTPUT="${TRIPLEBOOT_AUTONOMOUS_OUTPUT:-$(user_home)/tripleboot-aio/build/autonomous-payload}"
 
 usage() {
   cat <<'EOF'
@@ -170,7 +186,7 @@ cmd_stage_usb() {
   echo "[INFO] Ventoy data partition: $part"
   mount "$part" "$mnt"
 
-  rsync -aHAX "$output_dir"/ "$mnt"/
+  rsync -rltD --no-owner --no-group --no-perms --omit-dir-times --inplace "$output_dir"/ "$mnt"/
   sync
   umount "$mnt"
   rmdir "$mnt" || true
