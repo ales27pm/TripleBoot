@@ -64,11 +64,21 @@ sudo scripts/tripleboot_aio.sh build-opencore-scaffold \
 sudo scripts/tripleboot_aio.sh validate-opencore
 ```
 
+Prepare a standalone OpenCore recovery workspace/USB from Linux:
+
+```bash
+chmod +x scripts/hackintosh-opencore-prepare.sh
+scripts/hackintosh-opencore-prepare.sh --macos sequoia --workdir "$HOME/hackintosh"
+# Optional destructive USB staging:
+# sudo scripts/hackintosh-opencore-prepare.sh --macos sequoia --disk /dev/sdX --workdir "$HOME/hackintosh"
+```
+
 ## Repository map
 
 ```text
 .
 ├── scripts/tripleboot_aio.sh
+├── scripts/hackintosh-opencore-prepare.sh
 ├── docs/
 │   ├── 00-safety.md
 │   ├── 01-disk-layout.md
