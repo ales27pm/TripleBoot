@@ -707,7 +707,7 @@ installer_doctor() {
   ui_section "Installer factory doctor"
 
   local host_os=""
-  local required_common=(curl sha256sum lsblk find awk sed grep)
+  local required_common=(curl sha256sum lsblk find awk sed grep python3)
   local required_usb=(sgdisk wipefs partprobe mkfs.vfat mount umount rsync)
   local cmd=""
 
@@ -1227,10 +1227,6 @@ Current options:
 EOF_USB_PLAN
 }
 
-json_escape() {
-  python3 -c 'import json,sys; print(json.dumps(sys.stdin.read().rstrip("\n")))'
-}
-
 write_ventoy_config() {
   local mnt="$1"
   mkdir -p "$mnt/ventoy"
@@ -1328,47 +1324,67 @@ write_usb_manifest() {
   local osx_kvm_dir="$6"
   local include_opencore="$7"
   local opencore_efi="$8"
+  local include_repo_docs="$9"
   local manifest="$mnt/TripleBoot/MANIFEST.json"
   local sums="$mnt/TripleBoot/SHA256SUMS"
   local generated_at=""
   local ubuntu_name=""
   local windows_name=""
-  local osx_dir_json="null"
-  local opencore_json="null"
+
+  require python3
 
   generated_at="$(date --iso-8601=seconds)"
   [[ -n "$ubuntu_iso" ]] && ubuntu_name="$(basename "$ubuntu_iso")"
   [[ -n "$windows_iso" ]] && windows_name="$(basename "$windows_iso")"
-  if [[ "$include_osx_kvm" == true ]]; then
-    osx_dir_json="$(printf '%s' "$osx_kvm_dir" | json_escape)"
-  fi
-  if [[ "$include_opencore" == true ]]; then
-    opencore_json="$(printf '%s' "$opencore_efi" | json_escape)"
-  fi
 
-  cat > "$manifest" <<EOF_MANIFEST
-{
-  "schema": "https://tripleboot.local/schemas/usb-manifest-v1.json",
-  "tool": "TripleBoot AIO",
-  "version": "$VERSION",
-  "generated_at": "$generated_at",
-  "usb_disk": "$(printf '%s' "$usb" | sed 's/"/\\"/g')",
-  "payloads": {
-    "ubuntu_iso": "$(printf '%s' "$ubuntu_name" | sed 's/"/\\"/g')",
-    "windows_iso": "$(printf '%s' "$windows_name" | sed 's/"/\\"/g')",
-    "osx_kvm_included": $include_osx_kvm,
-    "osx_kvm_source": $osx_dir_json,
-    "opencore_included": $include_opencore,
-    "opencore_source": $opencore_json,
-    "repo_docs_included": true
-  },
-  "warnings": [
-    "Destructive disk operations still require a separate preflight and explicit confirmation.",
-    "OpenCore configuration is hardware-specific and must be manually reviewed.",
-    "Official macOS bootable installers require macOS createinstallmedia."
-  ]
+  python3 - "$manifest" "$VERSION" "$generated_at" "$usb" "$ubuntu_name" "$windows_name" "$include_osx_kvm" "$osx_kvm_dir" "$include_opencore" "$opencore_efi" "$include_repo_docs" <<'PY_MANIFEST'
+import json
+import sys
+
+(
+    manifest_path,
+    version,
+    generated_at,
+    usb_disk,
+    ubuntu_iso,
+    windows_iso,
+    include_osx_kvm,
+    osx_kvm_dir,
+    include_opencore,
+    opencore_efi,
+    include_repo_docs,
+) = sys.argv[1:]
+
+osx_kvm_included = include_osx_kvm == "true"
+opencore_included = include_opencore == "true"
+repo_docs_included = include_repo_docs == "true"
+
+manifest = {
+    "schema": "https://tripleboot.local/schemas/usb-manifest-v1.json",
+    "tool": "TripleBoot AIO",
+    "version": version,
+    "generated_at": generated_at,
+    "usb_disk": usb_disk,
+    "payloads": {
+        "ubuntu_iso": ubuntu_iso,
+        "windows_iso": windows_iso,
+        "osx_kvm_included": osx_kvm_included,
+        "osx_kvm_source": osx_kvm_dir if osx_kvm_included else None,
+        "opencore_included": opencore_included,
+        "opencore_source": opencore_efi if opencore_included else None,
+        "repo_docs_included": repo_docs_included,
+    },
+    "warnings": [
+        "Destructive disk operations still require a separate preflight and explicit confirmation.",
+        "OpenCore configuration is hardware-specific and must be manually reviewed.",
+        "Official macOS bootable installers require macOS createinstallmedia.",
+    ],
 }
-EOF_MANIFEST
+
+with open(manifest_path, "w", encoding="utf-8") as f:
+    json.dump(manifest, f, indent=2)
+    f.write("\n")
+PY_MANIFEST
 
   (
     cd "$mnt"
@@ -1463,7 +1479,7 @@ stage_tripleboot_usb() {
 
   write_ventoy_config "$mnt"
   write_tripleboot_usb_guides "$mnt" "$include_osx_kvm" "$include_opencore"
-  write_usb_manifest "$mnt" "$usb" "$ubuntu_iso" "$windows_iso" "$include_osx_kvm" "$osx_kvm_dir" "$include_opencore" "$opencore_efi"
+  write_usb_manifest "$mnt" "$usb" "$ubuntu_iso" "$windows_iso" "$include_osx_kvm" "$osx_kvm_dir" "$include_opencore" "$opencore_efi" "$include_repo_docs"
 
   sync
   run umount "$mnt"
