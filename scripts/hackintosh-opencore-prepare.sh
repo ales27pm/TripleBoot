@@ -80,7 +80,7 @@ Examples:
 Options:
   --macos     Recovery version to download. Default: sequoia
   --workdir   Workspace directory. Default: \$HOME/hackintosh-opencore
-  --disk      Optional USB disk to format. Example: /dev/sdX
+  --disk      Optional USB disk to format. Example: /dev/sdX (sdX is also accepted)
   --force     Skip destructive USB confirmation prompt
 EOF_USAGE
 }
@@ -90,6 +90,16 @@ require_arg() {
   local value="${2:-}"
 
   [[ -n "$value" && "$value" != --* ]] || die "Missing value for ${flag}"
+}
+
+normalize_disk_arg() {
+  local disk="$1"
+
+  if [[ "$disk" != /* ]]; then
+    disk="/dev/$disk"
+  fi
+
+  printf '%s\n' "$disk"
 }
 
 while [[ $# -gt 0 ]]; do
@@ -128,8 +138,12 @@ case "$MACOS" in
   *) die "Unsupported --macos value: $MACOS" ;;
 esac
 
-if [[ -n "$DISK" && $EUID -ne 0 ]]; then
-  die "USB formatting requires root. Re-run with sudo or omit --disk."
+if [[ -n "$DISK" ]]; then
+  DISK="$(normalize_disk_arg "$DISK")"
+
+  if [[ $EUID -ne 0 ]]; then
+    die "USB formatting requires root. Re-run with sudo or omit --disk."
+  fi
 fi
 
 if [[ "$(uname -s)" != "Linux" ]]; then
@@ -144,6 +158,14 @@ missing_commands() {
       printf '%s\n' "$command_name"
     fi
   done
+}
+
+validate_usb_disk() {
+  [[ -b "$DISK" ]] || die "$DISK is not a block device"
+
+  local disk_type
+  disk_type="$(lsblk -dnro TYPE -- "$DISK")"
+  [[ "$disk_type" == "disk" ]] || die "$DISK must be a whole disk (TYPE=disk), not TYPE=${disk_type:-unknown}"
 }
 
 install_deps() {
@@ -439,11 +461,7 @@ EOF_NEXT_STEPS
 }
 
 format_usb_and_copy() {
-  [[ -b "$DISK" ]] || die "$DISK is not a block device"
-
-  local disk_type
-  disk_type="$(lsblk -dnro TYPE -- "$DISK")"
-  [[ "$disk_type" == "disk" ]] || die "$DISK must be a whole disk (TYPE=disk), not TYPE=${disk_type:-unknown}"
+  validate_usb_disk
 
   warn "This will DESTROY all data on: $DISK"
   lsblk "$DISK"
@@ -499,6 +517,11 @@ format_usb_and_copy() {
 
 main() {
   install_deps
+
+  if [[ -n "$DISK" ]]; then
+    validate_usb_disk
+  fi
+
   prepare_dirs
   copy_opencore_files
   download_kexts
