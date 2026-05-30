@@ -1,0 +1,108 @@
+# TripleBoot machine profile for PC-27pm
+# This file is intentionally conservative. Disk IDs must be replaced with stable
+# /dev/disk/by-id values before any autonomous destructive install is allowed.
+
+profile_version: 1
+machine_id: pc-27pm
+owner: ales27pm
+mode: autonomous-tripleboot-usb
+
+host:
+  firmware: uefi
+  secure_boot: disabled
+  architecture: x86_64
+  timezone: America/Montreal
+  locale: en_CA.UTF-8
+  keyboard: us
+
+hardware:
+  board: "ASUSTeK COMPUTER INC. ROG STRIX B560-A GAMING WIFI"
+  cpu: "11th Gen Intel(R) Core(TM) i7-11700 @ 2.50GHz"
+  gpu_notes:
+    - "NVIDIA RTX/Turing detected; do not treat this as a macOS acceleration path."
+
+safety:
+  require_uefi: true
+  require_efi_backup: true
+  refuse_running_root_disk: true
+  refuse_unknown_disks: true
+  refuse_data_partitions_unless_explicitly_allowed: true
+  destructive_confirmation_token: BUILD_AUTONOMOUS_TRIPLEBOOT
+
+usb:
+  min_size_gb: 128
+  engine: ventoy
+  partition_style: gpt
+  secure_boot_support: false
+
+# Replace all /dev/nvme* paths with stable /dev/disk/by-id entries before using
+# this profile for destructive install automation.
+target_disks:
+  ubuntu_disk:
+    role: ubuntu
+    current_path_hint: /dev/nvme0n1
+    by_id: REPLACE_WITH_DEV_DISK_BY_ID_FOR_UBUNTU_TARGET
+    allow_wipe: false
+    notes: "Currently the running Ubuntu root disk in field tests; must not be wiped from live system."
+  winmac_disk:
+    role: windows_macos
+    current_path_hint: /dev/nvme1n1
+    by_id: REPLACE_WITH_DEV_DISK_BY_ID_FOR_WINMAC_TARGET
+    allow_wipe: false
+    allow_wipe_data: false
+    data_partition_hint: /dev/nvme1n1p1
+    notes: "Contains DATA in field tests; requires explicit override before wipe."
+
+partition_plan:
+  scheme: gpt
+  esp:
+    size: 1024MiB
+    filesystem: fat32
+    label: WINMAC_EFI
+  windows:
+    size: 500GiB
+    filesystem: ntfs
+    label: WINDOWS
+  ubuntu:
+    size: rest-on-ubuntu-disk
+    filesystem: ext4
+    label: UBUNTU_ROOT
+  macos:
+    size: remaining-after-windows
+    filesystem: apfs-placeholder
+    label: MACOS_APFS
+
+installers:
+  ubuntu:
+    version: "26.04"
+    edition: desktop
+    arch: amd64
+    unattended: true
+    template: templates/ubuntu/user-data.yml
+  windows:
+    version: "11"
+    edition: pro
+    unattended: true
+    template: templates/windows/Autounattend.xml
+    product_key: ""
+  macos:
+    official_createinstallmedia: macos-host-only
+    pc_or_vm_mode: osx-kvm-opencore-assets
+    include_osx_kvm_assets: true
+    include_user_supplied_apple_binaries: false
+
+default_user:
+  username: ales27pm
+  full_name: "Alexis Boulet"
+  # Set this only in a private, local profile override. Never commit real hashes.
+  password_hash: "$6$REPLACE_WITH_SHA512_CRYPT_HASH"
+
+network:
+  ubuntu_network: dhcp
+  windows_network: dhcp
+
+ventoy:
+  theme: default
+  auto_install:
+    ubuntu_iso_pattern: "/ISO/Ubuntu/ubuntu-26.04-desktop-amd64.iso"
+    windows_iso_pattern: "/ISO/Windows/Windows11.iso"
