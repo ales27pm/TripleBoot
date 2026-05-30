@@ -36,6 +36,23 @@ The macOS partition is intentionally left unformatted by the script and should b
 
 ## Fast start
 
+Start with the consolidated menu and saved defaults flow:
+
+```bash
+chmod +x scripts/tripleboot_aio.sh
+sudo -E scripts/tripleboot_aio.sh menu
+```
+
+In the menu, use **Configure saved defaults** once to store reusable disk, ISO, USB, Ubuntu, and OpenCore settings in `~/.config/tripleboot/defaults.env`. You can then run the default-backed shortcuts without repeating long argument lists:
+
+```bash
+sudo -E scripts/tripleboot_aio.sh show-defaults
+sudo -E scripts/tripleboot_aio.sh default-preflight-partition
+sudo -E scripts/tripleboot_aio.sh default-build-tripleboot-usb --yes-destroy
+```
+
+The direct command mode is still available for automation and one-off tasks:
+
 ```bash
 chmod +x scripts/tripleboot_aio.sh
 sudo scripts/tripleboot_aio.sh install-deps
