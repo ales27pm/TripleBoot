@@ -14,7 +14,7 @@ TripleBoot is designed as a guarded helper, not a blind OS installer.
 
 ## Destructive commands
 
-The `partition`, `make-usb`, and `restore-efi` commands are destructive. They require explicit flags and typed confirmations.
+The `partition`, `make-usb`, `prepare-usb-*`, `prepare-usb-ventoy`, `build-tripleboot-usb`, and `restore-efi` commands are destructive. They require explicit flags and typed confirmations.
 
 Example:
 

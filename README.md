@@ -44,6 +44,21 @@ sudo scripts/tripleboot_aio.sh analyze
 sudo scripts/tripleboot_aio.sh boot-report
 ```
 
+Build the end-to-end TripleBoot USB installer/recovery kit:
+
+```bash
+sudo scripts/tripleboot_aio.sh usb-plan --include-opencore
+sudo scripts/tripleboot_aio.sh build-tripleboot-usb \
+  --usb-disk /dev/sdX \
+  --windows-iso ~/Downloads/Windows11.iso \
+  --ubuntu-version 26.04 \
+  --include-opencore \
+  --yes-destroy
+sudo scripts/tripleboot_aio.sh tripleboot-usb-status --usb-disk /dev/sdX
+```
+
+The USB is Ventoy-based and includes installer ISOs, generated quickstart notes, a manifest, checksums, offline project docs, and optional OpenCore/OSX-KVM recovery payloads. See [`docs/07-end-to-end-usb.md`](docs/07-end-to-end-usb.md).
+
 Partition only after validating disk names:
 
 ```bash
@@ -86,7 +101,8 @@ scripts/hackintosh-opencore-prepare.sh --macos sequoia --workdir "$HOME/hackinto
 │   ├── 03-opencore.md
 │   ├── 04-gpu-notes.md
 │   ├── 05-troubleshooting.md
-│   └── 06-recovery.md
+│   ├── 06-recovery.md
+│   └── 07-end-to-end-usb.md
 ├── examples/tripleboot.env.example
 ├── STATE.md
 └── .github/workflows/shellcheck.yml

@@ -31,7 +31,7 @@ The project must never behave like a blind installer. Destructive operations req
 
 - `scripts/tripleboot_aio.sh`: main AIO script
 - `scripts/hackintosh-opencore-prepare.sh`: standalone Linux OpenCore recovery workspace/USB preparer
-- `docs/`: operational documentation
+- `docs/`: operational documentation, including the end-to-end TripleBoot USB workflow
 - `examples/tripleboot.env.example`: environment configuration example
 - `.github/workflows/shellcheck.yml`: shell lint CI
 
@@ -40,5 +40,6 @@ The project must never behave like a blind installer. Destructive operations req
 - Add fixture-based tests for disk naming, especially NVMe `p1` partition suffix handling.
 - Add JSON schema for scan inventory output.
 - Add optional local dry-run test harness using loopback disks.
+- Add JSON schema validation for the generated TripleBoot USB manifest.
 - Add OpenCore config fragment generator modules instead of one monolithic Bash implementation.
 - Add docs for supported AMD GPU candidates and iGPU limitations.

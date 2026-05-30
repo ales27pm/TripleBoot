@@ -7,7 +7,7 @@
 set -Eeuo pipefail
 IFS=$'\n\t'
 
-VERSION="2026.05.26"
+VERSION="2026.05.30"
 WORKDIR="${TRIPLEBOOT_WORKDIR:-$HOME/tripleboot-aio}"
 BACKUP_ROOT="${TRIPLEBOOT_BACKUP_ROOT:-$WORKDIR/backups}"
 INVENTORY_DIR="${TRIPLEBOOT_INVENTORY_DIR:-$WORKDIR/inventory}"
@@ -170,8 +170,9 @@ Commands:
   osx-kvm-offline-iso --pkg FILE [--dir DIR]
   download-ventoy [--version latest]
   prepare-usb-ventoy --usb-disk DISK --yes-destroy
-  stage-tripleboot-usb --usb-disk DISK [--ubuntu-iso FILE] [--windows-iso FILE] [--osx-kvm-dir DIR]
-  build-tripleboot-usb --usb-disk DISK --windows-iso FILE|--windows-iso-url URL [--ubuntu-version 26.04] [--include-osx-kvm] --yes-destroy
+  usb-plan [--include-osx-kvm] [--include-opencore]
+  stage-tripleboot-usb --usb-disk DISK [--ubuntu-iso FILE] [--windows-iso FILE] [--osx-kvm-dir DIR] [--opencore-efi DIR]
+  build-tripleboot-usb --usb-disk DISK --windows-iso FILE|--windows-iso-url URL [--ubuntu-version 26.04] [--include-osx-kvm] [--include-opencore] --yes-destroy
   tripleboot-usb-status --usb-disk DISK
   backup-efi
   boot-report
@@ -706,7 +707,7 @@ installer_doctor() {
   ui_section "Installer factory doctor"
 
   local host_os=""
-  local required_common=(curl sha256sum lsblk find awk sed grep)
+  local required_common=(curl sha256sum lsblk find awk sed grep python3)
   local required_usb=(sgdisk wipefs partprobe mkfs.vfat mount umount rsync)
   local cmd=""
 
@@ -760,9 +761,10 @@ installer_doctor() {
 
   echo
   echo "=== Recommended flow ==="
-  echo "Ubuntu: download-ubuntu -> prepare-usb-ubuntu"
-  echo "Windows: download-windows --iso-url/--iso-file -> prepare-usb-windows"
-  echo "macOS: run download-macos/prepare-usb-macos from macOS only"
+  echo "Ubuntu: download-ubuntu -> prepare-usb-ubuntu or build-tripleboot-usb"
+  echo "Windows: download-windows --iso-url/--iso-file -> prepare-usb-windows or build-tripleboot-usb"
+  echo "macOS: run download-macos/prepare-usb-macos from macOS only; Linux can stage OpenCore/OSX-KVM assets"
+  echo "End-to-end kit: usb-plan -> build-tripleboot-usb -> tripleboot-usb-status"
 }
 
 download_ubuntu() {
@@ -1168,6 +1170,231 @@ mount_ventoy_data_rw() {
   printf '%s\n' "$mnt"
 }
 
+usb_plan() {
+  local include_osx_kvm=false
+  local include_opencore=false
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --include-osx-kvm) include_osx_kvm=true; shift ;;
+      --include-opencore) include_opencore=true; shift ;;
+      *) die "Unknown usb-plan arg: $1" ;;
+    esac
+  done
+
+  tripleboot_banner
+  cat <<EOF_USB_PLAN
+TripleBoot USB end-to-end plan
+
+Purpose:
+  Build one UEFI-bootable USB kit that carries Ubuntu, Windows, project runbooks,
+  checksums, optional OpenCore EFI files, and optional OSX-KVM recovery assets.
+
+Recommended command:
+  sudo scripts/tripleboot_aio.sh build-tripleboot-usb --usb-disk /dev/sdX --windows-iso /path/to/Windows.iso --ubuntu-version 26.04 --include-opencore --yes-destroy
+
+Pipeline:
+  1. installer-doctor validates required host tools.
+  2. download-ubuntu downloads and verifies the Ubuntu ISO with SHA256SUMS.
+  3. download-windows stages a user-provided official Microsoft ISO or URL.
+  4. download-ventoy fetches the multiboot USB engine.
+  5. prepare-usb-ventoy erases the selected USB and installs Ventoy.
+  6. stage-tripleboot-usb copies installers, docs, generated guides, manifest,
+     SHA256SUMS, and optional macOS lab/recovery assets.
+  7. tripleboot-usb-status mounts the USB read-only enough to report payloads.
+
+Payload layout:
+  /ISO/Ubuntu/              Ubuntu installer ISO(s)
+  /ISO/Windows/             Windows installer ISO(s)
+  /EFI/OPENCORE/            Optional OpenCore EFI payload for manual copying
+  /macOS/OSX-KVM/           Optional Linux-hosted macOS VM/recovery workflow
+  /TripleBoot/README-FIRST.txt
+  /TripleBoot/QUICKSTART.md
+  /TripleBoot/MANIFEST.json
+  /TripleBoot/SHA256SUMS
+  /TripleBoot/repo/         Offline copy of this repository's docs/scripts
+  /ventoy/ventoy.json       Human-friendly Ventoy menu aliases
+
+Safety model:
+  - The USB build is destructive and requires --yes-destroy plus typed confirmation.
+  - The tool refuses to target the running root disk unless --force is supplied.
+  - macOS installer binaries are not distributed or generated on Linux.
+  - OpenCore files are staged as a reviewable lab payload, not auto-installed to an internal ESP.
+
+Current options:
+  Include OSX-KVM assets: $include_osx_kvm
+  Include OpenCore EFI:  $include_opencore
+EOF_USB_PLAN
+}
+
+write_ventoy_config() {
+  local mnt="$1"
+  mkdir -p "$mnt/ventoy"
+  cat > "$mnt/ventoy/ventoy.json" <<'EOF_VENTOY'
+{
+  "control": [
+    { "VTOY_DEFAULT_MENU_MODE": "0" },
+    { "VTOY_TREE_VIEW_MENU_STYLE": "1" }
+  ],
+  "menu_alias": [
+    { "image": "/ISO/Ubuntu/", "alias": "Ubuntu installer" },
+    { "image": "/ISO/Windows/", "alias": "Windows installer" },
+    { "image": "/macOS/OSX-KVM/", "alias": "macOS VM/OpenCore recovery assets (not directly bootable as an Apple installer)" }
+  ]
+}
+EOF_VENTOY
+}
+
+write_tripleboot_usb_guides() {
+  local mnt="$1"
+  local include_osx_kvm="$2"
+  local include_opencore="$3"
+  local generated_at=""
+
+  generated_at="$(date --iso-8601=seconds)"
+  mkdir -p "$mnt/TripleBoot"
+
+  cat > "$mnt/TripleBoot/README-FIRST.txt" <<EOF_README
+TripleBoot USB
+
+Generated: $generated_at
+Tool: TripleBoot AIO v$VERSION
+
+This USB is built as a Ventoy multiboot installer and recovery kit.
+
+Boot menu:
+- Ubuntu ISO(s): /ISO/Ubuntu
+- Windows ISO(s): /ISO/Windows
+
+macOS/OpenCore scope:
+- Official full macOS USB creation requires macOS + createinstallmedia.
+- Linux-hosted macOS assets, when included, live under /macOS/OSX-KVM.
+- OpenCore EFI files, when included, live under /EFI/OPENCORE for manual review/copying.
+
+Safety:
+- Do not wipe internal disks until preflight-partition passes.
+- Keep BitLocker recovery keys available before changing Windows boot files.
+- Keep EFI backups before changing bootloaders.
+- Treat OpenCore as hardware-specific; validate and review before booting bare metal.
+EOF_README
+
+  cat > "$mnt/TripleBoot/QUICKSTART.md" <<EOF_QUICKSTART
+# TripleBoot USB quickstart
+
+## 1. Boot policy
+
+Boot this USB in **UEFI mode**. If firmware shows duplicate entries for the USB,
+choose the one prefixed with `UEFI:`.
+
+## 2. Install order
+
+1. Boot Ubuntu installer from `/ISO/Ubuntu` and install to the Ubuntu disk.
+2. Boot Windows installer from `/ISO/Windows` and install to the Windows partition/disk.
+3. Only after Ubuntu and Windows are stable, test OpenCore from removable media.
+4. Keep OpenCore experimental until `ocvalidate` and hardware-specific review pass.
+
+## 3. On-USB payloads
+
+- `TripleBoot/MANIFEST.json` records what this tool staged.
+- `TripleBoot/SHA256SUMS` lets you verify staged payloads with `sha256sum -c`.
+- `TripleBoot/repo/docs` contains the offline runbooks.
+- Optional OSX-KVM included: `$include_osx_kvm`.
+- Optional OpenCore EFI included: `$include_opencore`.
+
+## 4. Before touching internal disks
+
+From a Linux live session, run:
+
+```bash
+sudo TripleBoot/repo/scripts/tripleboot_aio.sh scan
+sudo TripleBoot/repo/scripts/tripleboot_aio.sh installer-doctor
+sudo TripleBoot/repo/scripts/tripleboot_aio.sh preflight-partition --ubuntu-disk /dev/nvme0n1 --winmac-disk /dev/nvme1n1
+```
+
+Adjust disk names to match `lsblk` output.
+EOF_QUICKSTART
+}
+
+write_usb_manifest() {
+  local mnt="$1"
+  local usb="$2"
+  local ubuntu_iso="$3"
+  local windows_iso="$4"
+  local include_osx_kvm="$5"
+  local osx_kvm_dir="$6"
+  local include_opencore="$7"
+  local opencore_efi="$8"
+  local include_repo_docs="$9"
+  local manifest="$mnt/TripleBoot/MANIFEST.json"
+  local sums="$mnt/TripleBoot/SHA256SUMS"
+  local generated_at=""
+  local ubuntu_name=""
+  local windows_name=""
+
+  require python3
+
+  generated_at="$(date --iso-8601=seconds)"
+  [[ -n "$ubuntu_iso" ]] && ubuntu_name="$(basename "$ubuntu_iso")"
+  [[ -n "$windows_iso" ]] && windows_name="$(basename "$windows_iso")"
+
+  python3 - "$manifest" "$VERSION" "$generated_at" "$usb" "$ubuntu_name" "$windows_name" "$include_osx_kvm" "$osx_kvm_dir" "$include_opencore" "$opencore_efi" "$include_repo_docs" <<'PY_MANIFEST'
+import json
+import sys
+
+(
+    manifest_path,
+    version,
+    generated_at,
+    usb_disk,
+    ubuntu_iso,
+    windows_iso,
+    include_osx_kvm,
+    osx_kvm_dir,
+    include_opencore,
+    opencore_efi,
+    include_repo_docs,
+) = sys.argv[1:]
+
+osx_kvm_included = include_osx_kvm == "true"
+opencore_included = include_opencore == "true"
+repo_docs_included = include_repo_docs == "true"
+
+manifest = {
+    "schema": "https://tripleboot.local/schemas/usb-manifest-v1.json",
+    "tool": "TripleBoot AIO",
+    "version": version,
+    "generated_at": generated_at,
+    "usb_disk": usb_disk,
+    "payloads": {
+        "ubuntu_iso": ubuntu_iso,
+        "windows_iso": windows_iso,
+        "osx_kvm_included": osx_kvm_included,
+        "osx_kvm_source": osx_kvm_dir if osx_kvm_included else None,
+        "opencore_included": opencore_included,
+        "opencore_source": opencore_efi if opencore_included else None,
+        "repo_docs_included": repo_docs_included,
+    },
+    "warnings": [
+        "Destructive disk operations still require a separate preflight and explicit confirmation.",
+        "OpenCore configuration is hardware-specific and must be manually reviewed.",
+        "Official macOS bootable installers require macOS createinstallmedia.",
+    ],
+}
+
+with open(manifest_path, "w", encoding="utf-8") as f:
+    json.dump(manifest, f, indent=2)
+    f.write("\n")
+PY_MANIFEST
+
+  (
+    cd "$mnt"
+    find ISO EFI macOS TripleBoot -type f 2>/dev/null \
+      ! -path 'TripleBoot/SHA256SUMS' \
+      ! -path 'TripleBoot/repo/.git/*' \
+      -print0 | sort -z | xargs -0 sha256sum
+  ) > "$sums"
+}
+
 stage_tripleboot_usb() {
   need_root
 
@@ -1176,7 +1403,9 @@ stage_tripleboot_usb() {
   local windows_iso=""
   local osx_kvm_dir=""
   local include_osx_kvm=false
+  local include_opencore=false
   local include_repo_docs=true
+  local opencore_efi=""
   local mnt=""
   local repo_root=""
 
@@ -1187,6 +1416,8 @@ stage_tripleboot_usb() {
       --windows-iso) windows_iso="$2"; shift 2 ;;
       --osx-kvm-dir) osx_kvm_dir="$2"; include_osx_kvm=true; shift 2 ;;
       --include-osx-kvm) include_osx_kvm=true; shift ;;
+      --opencore-efi) opencore_efi="$2"; include_opencore=true; shift 2 ;;
+      --include-opencore) include_opencore=true; shift ;;
       --no-repo-docs) include_repo_docs=false; shift ;;
       *) die "Unknown stage-tripleboot-usb arg: $1" ;;
     esac
@@ -1204,9 +1435,14 @@ stage_tripleboot_usb() {
     [[ -d "$osx_kvm_dir" ]] || die "OSX-KVM dir not found: $osx_kvm_dir"
   fi
 
+  if [[ "$include_opencore" == true ]]; then
+    [[ -n "$opencore_efi" ]] || opencore_efi="$BUILD_DIR/EFI"
+    [[ -d "$opencore_efi/OC" && -d "$opencore_efi/BOOT" ]] || die "OpenCore EFI payload not found at $opencore_efi. Run download-opencore, download-kexts, and build-opencore-scaffold first, or pass --opencore-efi DIR."
+  fi
+
   mnt="$(mount_ventoy_data_rw "$usb")"
 
-  mkdir -p "$mnt/ISO/Ubuntu" "$mnt/ISO/Windows" "$mnt/macOS/OSX-KVM" "$mnt/TripleBoot"
+  mkdir -p "$mnt/ISO/Ubuntu" "$mnt/ISO/Windows" "$mnt/macOS/OSX-KVM" "$mnt/TripleBoot" "$mnt/EFI"
 
   if [[ -n "$ubuntu_iso" ]]; then
     run rsync -ah --info=progress2 "$ubuntu_iso" "$mnt/ISO/Ubuntu/"
@@ -1225,6 +1461,11 @@ stage_tripleboot_usb() {
       "$osx_kvm_dir"/ "$mnt/macOS/OSX-KVM/"
   fi
 
+  if [[ "$include_opencore" == true ]]; then
+    mkdir -p "$mnt/EFI/OPENCORE"
+    run rsync -aHAX --delete "$opencore_efi"/ "$mnt/EFI/OPENCORE/"
+  fi
+
   repo_root="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
   if [[ "$include_repo_docs" == true && -d "$repo_root" ]]; then
     run rsync -ah \
@@ -1236,26 +1477,9 @@ stage_tripleboot_usb() {
       "$repo_root"/ "$mnt/TripleBoot/repo/"
   fi
 
-  cat > "$mnt/TripleBoot/README-FIRST.txt" <<'EOF_README'
-TripleBoot USB
-
-This USB is built as a Ventoy multiboot installer kit.
-
-Boot menu:
-- Ubuntu ISO is under /ISO/Ubuntu
-- Windows ISO is under /ISO/Windows
-
-macOS:
-- Official full macOS USB creation requires macOS + createinstallmedia.
-- Linux-hosted macOS flow is staged under /macOS/OSX-KVM as a VM/OpenCore recovery workflow.
-- Use OSX-KVM on Linux to install macOS into a VM disk.
-- For physical Hackintosh/OpenCore work, review OpenCore configuration manually.
-
-Safety:
-- Do not wipe disks until preflight-partition passes.
-- If DATA exists, preserve it unless explicitly intentionally wiping it.
-- Keep EFI backups before changing bootloaders.
-EOF_README
+  write_ventoy_config "$mnt"
+  write_tripleboot_usb_guides "$mnt" "$include_osx_kvm" "$include_opencore"
+  write_usb_manifest "$mnt" "$usb" "$ubuntu_iso" "$windows_iso" "$include_osx_kvm" "$osx_kvm_dir" "$include_opencore" "$opencore_efi" "$include_repo_docs"
 
   sync
   run umount "$mnt"
@@ -1293,13 +1517,19 @@ tripleboot_usb_status() {
 
   echo
   echo "=== Payload files ==="
-  find "$mnt" -maxdepth 4 -type f \
-    \( -iname '*.iso' -o -iname '*.img' -o -iname '*.dmg' -o -iname 'README-FIRST.txt' \) \
+  find "$mnt" -maxdepth 5 -type f \
+    \( -iname '*.iso' -o -iname '*.img' -o -iname '*.dmg' -o -iname 'README-FIRST.txt' -o -iname 'QUICKSTART.md' -o -iname 'MANIFEST.json' -o -iname 'SHA256SUMS' -o -iname 'ventoy.json' \) \
     -printf '%P\n' | sort
+
+  if [[ -f "$mnt/TripleBoot/MANIFEST.json" ]] && have jq; then
+    echo
+    echo "=== Manifest summary ==="
+    jq -r '.payloads | to_entries[] | "\(.key): \(.value)"' "$mnt/TripleBoot/MANIFEST.json"
+  fi
 
   echo
   echo "=== Expected directories ==="
-  for d in ISO/Ubuntu ISO/Windows macOS/OSX-KVM TripleBoot; do
+  for d in ISO/Ubuntu ISO/Windows macOS/OSX-KVM TripleBoot EFI/OPENCORE ventoy; do
     if [[ -d "$mnt/$d" ]]; then
       echo "[OK] $d"
     else
@@ -1323,7 +1553,11 @@ build_tripleboot_usb() {
   local windows_iso_url=""
   local staged_windows_iso=""
   local include_osx_kvm=false
+  local include_opencore=false
   local osx_kvm_dir=""
+  local opencore_efi=""
+  local opencore_smbios="iMac20,1"
+  local opencore_gpu_policy="disable-nvidia"
   local skip_downloads=false
   local secure_boot=false
 
@@ -1338,6 +1572,10 @@ build_tripleboot_usb() {
       --windows-iso-url) windows_iso_url="$2"; shift 2 ;;
       --include-osx-kvm) include_osx_kvm=true; shift ;;
       --osx-kvm-dir) osx_kvm_dir="$2"; include_osx_kvm=true; shift 2 ;;
+      --include-opencore) include_opencore=true; shift ;;
+      --opencore-efi) opencore_efi="$2"; include_opencore=true; shift 2 ;;
+      --opencore-smbios) opencore_smbios="$2"; shift 2 ;;
+      --opencore-gpu-policy) opencore_gpu_policy="$2"; shift 2 ;;
       --skip-downloads) skip_downloads=true; shift ;;
       --secure-boot) secure_boot=true; shift ;;
       --yes-destroy) YES_DESTROY=true; shift ;;
@@ -1360,6 +1598,8 @@ build_tripleboot_usb() {
   echo "Windows ISO file: ${windows_iso:-not provided}"
   echo "Windows ISO URL: ${windows_iso_url:+provided}"
   echo "Include OSX-KVM assets: $include_osx_kvm"
+  echo "Include OpenCore EFI: $include_opencore"
+  echo "OpenCore SMBIOS/GPU policy: $opencore_smbios / $opencore_gpu_policy"
   echo "Secure Boot support in Ventoy: $secure_boot"
   echo
   echo "[DANGER] This will erase the selected USB disk, install Ventoy, and stage installers."
@@ -1390,8 +1630,20 @@ build_tripleboot_usb() {
         echo "[INFO] Run osx-kvm-fetch and osx-kvm-convert manually if you want macOS recovery assets staged."
       fi
     fi
+
+    if [[ "$include_opencore" == true && -z "$opencore_efi" ]]; then
+      download_opencore
+      download_kexts
+      build_opencore_scaffold --smbios "$opencore_smbios" --gpu-policy "$opencore_gpu_policy"
+      opencore_efi="$BUILD_DIR/EFI"
+    fi
   else
     staged_windows_iso="$windows_iso"
+  fi
+
+  if [[ "$include_opencore" == true ]]; then
+    [[ -n "$opencore_efi" ]] || opencore_efi="$BUILD_DIR/EFI"
+    [[ -d "$opencore_efi/OC" && -d "$opencore_efi/BOOT" ]] || die "OpenCore EFI payload missing: $opencore_efi"
   fi
 
   [[ -n "$ubuntu_iso" && -f "$ubuntu_iso" ]] || die "Ubuntu ISO missing after download/stage: $ubuntu_iso"
@@ -1405,11 +1657,14 @@ build_tripleboot_usb() {
     prepare_usb_ventoy --usb-disk "$usb" --yes-destroy
   fi
 
+  local -a stage_args=(--usb-disk "$usb" --ubuntu-iso "$ubuntu_iso" --windows-iso "$staged_windows_iso")
   if [[ "$include_osx_kvm" == true ]]; then
-    stage_tripleboot_usb --usb-disk "$usb" --ubuntu-iso "$ubuntu_iso" --windows-iso "$staged_windows_iso" --osx-kvm-dir "${osx_kvm_dir:-$(osx_kvm_dir_default)}"
-  else
-    stage_tripleboot_usb --usb-disk "$usb" --ubuntu-iso "$ubuntu_iso" --windows-iso "$staged_windows_iso"
+    stage_args+=(--osx-kvm-dir "${osx_kvm_dir:-$(osx_kvm_dir_default)}")
   fi
+  if [[ "$include_opencore" == true ]]; then
+    stage_args+=(--opencore-efi "$opencore_efi")
+  fi
+  stage_tripleboot_usb "${stage_args[@]}"
 
   tripleboot_usb_status --usb-disk "$usb"
 
@@ -1948,6 +2203,7 @@ main() {
     doctor) doctor ;;
     preflight-partition) preflight_partition "$@" ;;
     installer-doctor) installer_doctor ;;
+    usb-plan) usb_plan "$@" ;;
     download-ubuntu) download_ubuntu "$@" ;;
     verify-iso-sha256) verify_iso_sha256 "$@" ;;
     download-windows) download_windows "$@" ;;
