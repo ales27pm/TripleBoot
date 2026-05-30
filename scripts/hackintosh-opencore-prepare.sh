@@ -44,7 +44,15 @@ KEXT_REPOS=(
   "acidanthera/WhateverGreen"
   "acidanthera/AppleALC"
   "acidanthera/IntelMausi"
-  "acidanthera/AppleIGC"
+  "SongXiaoXi/AppleIGC"
+)
+
+REQUIRED_COMMANDS=(
+  curl jq unzip git python3 find rsync
+)
+
+USB_COMMANDS=(
+  lsblk umount wipefs sgdisk parted partprobe mkfs.vfat mount sync
 )
 
 log() {
@@ -128,8 +136,35 @@ if [[ "$(uname -s)" != "Linux" ]]; then
   die "This script is intended for Linux/Ubuntu."
 fi
 
+missing_commands() {
+  local command_name
+
+  for command_name in "$@"; do
+    if ! command -v "$command_name" >/dev/null 2>&1; then
+      printf '%s\n' "$command_name"
+    fi
+  done
+}
+
 install_deps() {
-  log "Installing dependencies"
+  log "Checking dependencies"
+
+  local required_commands=("${REQUIRED_COMMANDS[@]}")
+
+  if [[ -n "$DISK" ]]; then
+    required_commands+=("${USB_COMMANDS[@]}")
+  fi
+
+  local missing=()
+  mapfile -t missing < <(missing_commands "${required_commands[@]}")
+
+  if [[ "${#missing[@]}" -eq 0 ]]; then
+    log "Dependencies already installed"
+    return
+  fi
+
+  log "Installing missing dependencies: ${missing[*]}"
+
   if command -v apt-get >/dev/null 2>&1; then
     local apt_cmd=()
 
@@ -139,15 +174,15 @@ install_deps() {
       warn "Dependency installation requires root; using sudo for apt-get."
       apt_cmd=(sudo apt-get)
     else
-      die "Dependency installation requires root. Re-run as root/sudo or install dependencies manually."
+      die "Missing dependencies: ${missing[*]}. Install them manually or re-run with sudo/root."
     fi
 
     "${apt_cmd[@]}" update
     "${apt_cmd[@]}" install -y \
-      curl jq unzip git python3 python3-distutils \
+      curl jq unzip git python3 \
       dosfstools exfatprogs gdisk parted util-linux rsync
   else
-    die "Only apt-based distros are automated here. Install curl jq unzip git python3 dosfstools gdisk parted util-linux rsync manually."
+    die "Missing dependencies: ${missing[*]}. Only apt-based distros are automated here; install the missing tools manually."
   fi
 }
 
@@ -251,7 +286,14 @@ copy_kext_from_release() {
   zip="$WORKDIR/downloads/${name}.zip"
   extract="$WORKDIR/extract/${name}"
 
-  download_zip "$repo" '.*\.zip$' "$zip"
+  case "$repo" in
+    SongXiaoXi/AppleIGC)
+      download_zip "$repo" '^AppleIGC\.kext\.zip$' "$zip"
+      ;;
+    *)
+      download_zip "$repo" '.*-RELEASE\.zip$' "$zip"
+      ;;
+  esac
   extract_zip_clean "$zip" "$extract"
 
   local kexts
@@ -398,6 +440,10 @@ EOF_NEXT_STEPS
 
 format_usb_and_copy() {
   [[ -b "$DISK" ]] || die "$DISK is not a block device"
+
+  local disk_type
+  disk_type="$(lsblk -dnro TYPE -- "$DISK")"
+  [[ "$disk_type" == "disk" ]] || die "$DISK must be a whole disk (TYPE=disk), not TYPE=${disk_type:-unknown}"
 
   warn "This will DESTROY all data on: $DISK"
   lsblk "$DISK"
