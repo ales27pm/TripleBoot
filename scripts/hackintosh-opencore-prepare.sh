@@ -131,8 +131,19 @@ fi
 install_deps() {
   log "Installing dependencies"
   if command -v apt-get >/dev/null 2>&1; then
-    apt-get update
-    apt-get install -y \
+    local apt_cmd=()
+
+    if [[ $EUID -eq 0 ]]; then
+      apt_cmd=(apt-get)
+    elif command -v sudo >/dev/null 2>&1; then
+      warn "Dependency installation requires root; using sudo for apt-get."
+      apt_cmd=(sudo apt-get)
+    else
+      die "Dependency installation requires root. Re-run as root/sudo or install dependencies manually."
+    fi
+
+    "${apt_cmd[@]}" update
+    "${apt_cmd[@]}" install -y \
       curl jq unzip git python3 python3-distutils \
       dosfstools exfatprogs gdisk parted util-linux rsync
   else
@@ -261,7 +272,7 @@ copy_kext_from_release() {
         ;;
     esac
 
-    rsync -a --delete "$kext" "$WORKDIR/EFI/OC/Kexts/"
+    rsync -a "$kext" "$WORKDIR/EFI/OC/Kexts/"
     log "Added kext: $base"
   done
 }
