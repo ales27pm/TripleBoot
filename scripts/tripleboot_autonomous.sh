@@ -34,11 +34,13 @@ Commands:
   generate [--profile FILE] [--output-dir DIR]
   show-output [--output-dir DIR]
   stage-usb --usb-disk DISK [--profile FILE] [--output-dir DIR]
+  status-usb --usb-disk DISK
 
 Examples:
   scripts/tripleboot_autonomous.sh validate --profile profiles/pc-27pm.yml
   scripts/tripleboot_autonomous.sh generate --profile profiles/pc-27pm.yml
   sudo scripts/tripleboot_autonomous.sh stage-usb --usb-disk /dev/sdX --profile profiles/pc-27pm.yml
+  sudo scripts/tripleboot_autonomous.sh status-usb --usb-disk /dev/sdX
 EOF
 }
 
@@ -51,7 +53,7 @@ need_python() {
 
 need_root() {
   if [[ ${EUID:-$(id -u)} -ne 0 ]]; then
-    echo "[ERROR] stage-usb must run with sudo/root" >&2
+    echo "[ERROR] command must run with sudo/root" >&2
     exit 1
   fi
 }
@@ -96,6 +98,17 @@ ventoy_data_partition() {
   fi
   [[ -b "$part" ]] || { echo "[ERROR] Could not detect Ventoy data partition for $usb" >&2; exit 1; }
   printf '%s\n' "$part"
+}
+
+mount_ventoy_data() {
+  local usb="$1"
+  local part=""
+  local mnt=""
+  part="$(ventoy_data_partition "$usb")"
+  mnt="$(mktemp -d)"
+  echo "[INFO] Ventoy data partition: $part" >&2
+  mount "$part" "$mnt"
+  printf '%s\n' "$mnt"
 }
 
 cmd_validate() {
@@ -155,11 +168,68 @@ cmd_show_output() {
   find "$output_dir" -maxdepth 5 -type f | sort
 }
 
+cmd_status_usb() {
+  local usb=""
+  local mnt=""
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --usb-disk) usb="$2"; shift 2 ;;
+      *) echo "[ERROR] Unknown status-usb arg: $1" >&2; exit 1 ;;
+    esac
+  done
+
+  [[ -n "$usb" ]] || { echo "[ERROR] Missing --usb-disk" >&2; exit 1; }
+  need_root
+  assert_disk "$usb"
+
+  echo "=== USB disk ==="
+  lsblk -e7 -o NAME,SIZE,TYPE,FSTYPE,LABEL,PARTLABEL,MOUNTPOINTS,MODEL,TRAN "$usb"
+
+  mnt="$(mount_ventoy_data "$usb")"
+
+  echo
+  echo "=== Autonomous payload files ==="
+  find "$mnt" -maxdepth 6 -type f \
+    \( -path '*/autoinstall/*' -o -path '*/ventoy/ventoy.json' -o -path '*/TripleBoot/profile.yml' -o -path '*/TripleBoot/README-AUTONOMOUS.txt' \) \
+    -printf '%P\n' | sort
+
+  echo
+  echo "=== Required autonomous files ==="
+  local required=(
+    "ventoy/ventoy.json"
+    "autoinstall/ubuntu/user-data.yml"
+    "autoinstall/ubuntu/meta-data"
+    "autoinstall/windows/Autounattend.xml"
+    "TripleBoot/profile.yml"
+    "TripleBoot/README-AUTONOMOUS.txt"
+  )
+  local path=""
+  local missing=0
+  for path in "${required[@]}"; do
+    if [[ -f "$mnt/$path" ]]; then
+      echo "[OK] $path"
+    else
+      echo "[MISSING] $path"
+      missing=$((missing + 1))
+    fi
+  done
+
+  umount "$mnt"
+  rmdir "$mnt" || true
+
+  if [[ "$missing" -gt 0 ]]; then
+    echo "[ERROR] Autonomous payload incomplete: $missing missing file(s)" >&2
+    exit 2
+  fi
+
+  echo "[OK] Autonomous USB payload complete"
+}
+
 cmd_stage_usb() {
   local usb=""
   local profile="$DEFAULT_PROFILE"
   local output_dir="$DEFAULT_OUTPUT"
-  local part=""
   local mnt=""
 
   while [[ $# -gt 0 ]]; do
@@ -180,11 +250,7 @@ cmd_stage_usb() {
   cmd_generate --profile "$profile" --output-dir "$output_dir"
   [[ -d "$output_dir" ]] || { echo "[ERROR] Payload output missing: $output_dir" >&2; exit 1; }
 
-  part="$(ventoy_data_partition "$usb")"
-  mnt="$(mktemp -d)"
-
-  echo "[INFO] Ventoy data partition: $part"
-  mount "$part" "$mnt"
+  mnt="$(mount_ventoy_data "$usb")"
 
   rsync -rltD --no-owner --no-group --no-perms --omit-dir-times --inplace "$output_dir"/ "$mnt"/
   sync
@@ -194,6 +260,8 @@ cmd_stage_usb() {
   echo "[OK] Autonomous payload staged to USB: $usb"
   echo "[OK] Staged files:"
   find "$output_dir" -maxdepth 5 -type f | sort
+
+  cmd_status_usb --usb-disk "$usb"
 
   if [[ -x "$AIO" ]]; then
     echo
@@ -212,6 +280,7 @@ main() {
     generate) cmd_generate "$@" ;;
     show-output) cmd_show_output "$@" ;;
     stage-usb) cmd_stage_usb "$@" ;;
+    status-usb) cmd_status_usb "$@" ;;
     *) echo "[ERROR] Unknown command: $cmd" >&2; usage; exit 1 ;;
   esac
 }
