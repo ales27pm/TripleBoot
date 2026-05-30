@@ -54,7 +54,6 @@ sudo -E scripts/tripleboot_aio.sh default-build-tripleboot-usb --yes-destroy
 The direct command mode is still available for automation and one-off tasks:
 
 ```bash
-chmod +x scripts/tripleboot_aio.sh
 sudo scripts/tripleboot_aio.sh install-deps
 sudo scripts/tripleboot_aio.sh scan
 sudo scripts/tripleboot_aio.sh analyze

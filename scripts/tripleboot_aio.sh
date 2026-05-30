@@ -16,7 +16,15 @@ user_home() {
   local owner_home=""
 
   if [[ -n "$owner" && "$owner" != "root" ]]; then
-    owner_home="$(getent passwd "$owner" | cut -d: -f6 || true)"
+    if command -v getent >/dev/null 2>&1; then
+      owner_home="$(getent passwd "$owner" | cut -d: -f6 || true)"
+    fi
+    if [[ -z "$owner_home" && -r /etc/passwd ]]; then
+      owner_home="$(awk -F: -v user="$owner" '$1 == user {print $6; exit}' /etc/passwd || true)"
+    fi
+    if [[ -z "$owner_home" && "$owner" == "${USER:-}" ]]; then
+      owner_home="$HOME"
+    fi
   fi
 
   if [[ -n "$owner_home" ]]; then
@@ -26,11 +34,42 @@ user_home() {
   fi
 }
 
-DEFAULTS_FILE="${TRIPLEBOOT_DEFAULTS_FILE:-${XDG_CONFIG_HOME:-$(user_home)/.config}/tripleboot/defaults.env}"
-if [[ -f "$DEFAULTS_FILE" ]]; then
+safe_source_defaults() {
+  local file="$1"
+  local owner_uid=""
+  local mode=""
+  local accepted_uid="${SUDO_UID:-$(id -u)}"
+
+  [[ -f "$file" ]] || return 0
+
+  if [[ ! -r "$file" ]]; then
+    printf 'WARNING: refusing to source %s: not readable by current user\n' "$file" >&2
+    return 0
+  fi
+
+  owner_uid="$(stat -c '%u' "$file" 2>/dev/null || true)"
+  mode="$(stat -c '%a' "$file" 2>/dev/null || true)"
+  if [[ -z "$owner_uid" || -z "$mode" ]]; then
+    printf 'WARNING: refusing to source %s: unable to determine owner or permissions\n' "$file" >&2
+    return 0
+  fi
+
+  if [[ "$owner_uid" != "$(id -u)" && "$owner_uid" != "$accepted_uid" ]]; then
+    printf 'WARNING: refusing to source %s: not owned by current or invoking user\n' "$file" >&2
+    return 0
+  fi
+
+  if (( (8#$mode & 0022) != 0 )); then
+    printf 'WARNING: refusing to source %s: group/other-writable (%s)\n' "$file" "$mode" >&2
+    return 0
+  fi
+
   # shellcheck source=/dev/null
-  source "$DEFAULTS_FILE"
-fi
+  source "$file"
+}
+
+DEFAULTS_FILE="${TRIPLEBOOT_DEFAULTS_FILE:-${XDG_CONFIG_HOME:-$(user_home)/.config}/tripleboot/defaults.env}"
+safe_source_defaults "$DEFAULTS_FILE"
 
 WORKDIR="${TRIPLEBOOT_WORKDIR:-$(user_home)/tripleboot-aio}"
 BACKUP_ROOT="${TRIPLEBOOT_BACKUP_ROOT:-$WORKDIR/backups}"
@@ -187,7 +226,12 @@ bool_flag() {
 save_defaults() {
   local dest="$DEFAULTS_FILE"
   local tmp=""
-  mkdir -p "$(dirname "$dest")"
+  local defaults_dir=""
+  defaults_dir="$(dirname "$dest")"
+  mkdir -p "$defaults_dir"
+  if [[ ${EUID:-$(id -u)} -eq 0 && -n "${SUDO_UID:-}" && -n "${SUDO_GID:-}" && "$dest" == "$(user_home)"/* ]]; then
+    chown "${SUDO_UID}:${SUDO_GID}" "$defaults_dir" 2>/dev/null || true
+  fi
   tmp="$(mktemp)"
   {
     echo "# TripleBoot saved defaults"
@@ -219,6 +263,13 @@ save_defaults() {
   } > "$tmp"
   chmod 600 "$tmp"
   mv "$tmp" "$dest"
+  if [[ ${EUID:-$(id -u)} -eq 0 && -n "${SUDO_UID:-}" && -n "${SUDO_GID:-}" ]]; then
+    if chown "${SUDO_UID}:${SUDO_GID}" "$dest" 2>/dev/null; then
+      chmod 600 "$dest"
+    else
+      warn "Could not return ownership of defaults to ${SUDO_USER:-the invoking user}: $dest"
+    fi
+  fi
   info "Saved defaults: $dest"
 }
 
@@ -335,19 +386,20 @@ run_default_partition() {
 }
 
 default_partition_cmd() {
+  local yes_destroy=false
   while [[ $# -gt 0 ]]; do
     case "$1" in
-      --yes-destroy) YES_DESTROY=true; shift ;;
+      --yes-destroy) yes_destroy=true; shift ;;
       *) die "Unknown default-partition arg: $1" ;;
     esac
   done
-  [[ "$YES_DESTROY" == true ]] || die "Add --yes-destroy for destructive partitioning."
+  [[ "$yes_destroy" == true ]] || die "Add --yes-destroy for destructive partitioning."
   run_default_partition
 }
 
 run_default_build_usb() {
-  local -a args=(--usb-disk "$USB_DISK" --ubuntu-version "$UBUNTU_VERSION" --ubuntu-edition "$UBUNTU_EDITION" --ubuntu-arch "$UBUNTU_ARCH" --yes-destroy)
   require_default USB_DISK "USB disk"
+  local -a args=(--usb-disk "$USB_DISK" --ubuntu-version "$UBUNTU_VERSION" --ubuntu-edition "$UBUNTU_EDITION" --ubuntu-arch "$UBUNTU_ARCH" --yes-destroy)
   if [[ -n "$WINDOWS_ISO_URL" ]]; then
     args+=(--windows-iso-url "$WINDOWS_ISO_URL")
   else
@@ -364,13 +416,14 @@ run_default_build_usb() {
 }
 
 default_build_usb_cmd() {
+  local yes_destroy=false
   while [[ $# -gt 0 ]]; do
     case "$1" in
-      --yes-destroy) YES_DESTROY=true; shift ;;
+      --yes-destroy) yes_destroy=true; shift ;;
       *) die "Unknown default-build-tripleboot-usb arg: $1" ;;
     esac
   done
-  [[ "$YES_DESTROY" == true ]] || die "Add --yes-destroy for destructive USB build."
+  [[ "$yes_destroy" == true ]] || die "Add --yes-destroy for destructive USB build."
   run_default_build_usb
 }
 
@@ -408,6 +461,13 @@ menu_pause() {
   [[ -t 0 ]] || return 0
   printf '\nPress Enter to return to the menu...'
   read -r _ || true
+}
+
+menu_confirm_destructive() {
+  local token="$1" message="$2" answer=""
+  printf '%s\nType %s to continue: ' "$message" "$token"
+  read -r answer
+  [[ "$answer" == "$token" ]]
 }
 
 menu() {
@@ -472,10 +532,22 @@ EOF_MENU
         bool_flag "$INCLUDE_OSX_KVM" && usb_plan_args+=(--include-osx-kvm)
         usb_plan "${usb_plan_args[@]}"
         ;;
-      11) run_default_build_usb ;;
+      11)
+        if menu_confirm_destructive BUILD_TRIPLEBOOT_USB_DEFAULT "WARNING: Building the default TripleBoot USB will erase the saved default USB disk: ${USB_DISK:-not set}."; then
+          run_default_build_usb
+        else
+          info "Skipped default USB build."
+        fi
+        ;;
       12) require_default USB_DISK "USB disk"; tripleboot_usb_status --usb-disk "$USB_DISK" ;;
       13) run_default_preflight_partition ;;
-      14) run_default_partition ;;
+      14)
+        if menu_confirm_destructive DEFAULT_PARTITION_DESTROY "WARNING: Default partitioning will destroy data on target disks: Ubuntu=${UBUNTU_DISK:-not set}, Windows/macOS=${WINMAC_DISK:-not set}."; then
+          run_default_partition
+        else
+          info "Skipped default partitioning."
+        fi
+        ;;
       15) setup_swap --size "$UBUNTU_SWAP_SIZE" ;;
       16) run_default_opencore ;;
       17) osx_kvm_doctor ;;
